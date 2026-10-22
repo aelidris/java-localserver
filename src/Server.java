@@ -74,29 +74,38 @@ public class Server {
         System.out.println("📥 Received request:\n" + requestData);
 
         if (requestData.startsWith("GET")) {
+            String[] lines = requestData.split("\r\n");
+            String[] requestLineParts = lines[0].split(" ");
+            String path = requestLineParts.length > 1 ? requestLineParts[1] : "/";
 
-            java.nio.file.Path filePath = java.nio.file.Paths.get("public/index.html");
+            String filePathStr = path.equals("/") ? "public/index.html" : "public" + path;
+            java.nio.file.Path filePath = java.nio.file.Paths.get(filePathStr);
+
             String responseBody = "";
             String statusCode = "200 OK";
 
-            if (java.nio.file.Files.exists(filePath)) {
+            if (java.nio.file.Files.exists(filePath) && !java.nio.file.Files.isDirectory(filePath)) {
                 responseBody = new String(java.nio.file.Files.readAllBytes(filePath));
             } else {
                 statusCode = "404 Not Found";
-                responseBody = "<h1>404 Not Found</h1>";
+                java.nio.file.Path errorPath = java.nio.file.Paths.get("error_pages/404.html");
+                if (java.nio.file.Files.exists(errorPath)) {
+                    responseBody = new String(java.nio.file.Files.readAllBytes(errorPath));
+                } else {
+                    responseBody = "<h1>404 Not Found</h1>";
+                }
             }
 
             String httpResponse = "HTTP/1.1 " + statusCode + "\r\n" +
-                    "Content-Type: text/html; charset=UTF-8\r\n" +
-                    "Content-Length: " + responseBody.getBytes().length + "\r\n" +
-                    "Connection: close\r\n\r\n" +
-                    responseBody;
+                                  "Content-Type: text/html; charset=UTF-8\r\n" +
+                                  "Content-Length: " + responseBody.getBytes().length + "\r\n" +
+                                  "Connection: close\r\n\r\n" +
+                                  responseBody;
 
             client.write(ByteBuffer.wrap(httpResponse.getBytes()));
-
             client.close();
             key.cancel();
-            System.out.println("📤 Sent response index.html to client.");
+            System.out.println("📤 Handled request for path: " + path + " -> Status: " + statusCode);
         }
     }
 }
