@@ -1,1 +1,26 @@
-// # Server configuration
+{
+    "host": "127.0.0.1",
+    "ports": [
+        8080,
+        8081
+    ],
+    "client_max_body_size": 1048576,
+    "error_pages": {
+        "400": "error_pages/400.html",
+        "403": "error_pages/403.html",
+        "404": "error_pages/404.html",
+        "405": "error_pages/405.html",
+        "413": "error_pages/413.html",
+        "500": "error_pages/500.html"
+    },
+    "routes": {
+        "/": {
+            "accepted_methods": [
+                "GET"
+            ],
+            "root": "./public",
+            "default_file": "index.html",
+            "directory_listing": false
+        }
+    }
+}
