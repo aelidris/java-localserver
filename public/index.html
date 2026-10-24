@@ -91,14 +91,21 @@
             <a href="/random-page-test" class="btn" target="_blank">404 Not Found</a>
 
             <!-- 405 Method Not Allowed -->
-            <form action="/" method="POST" target="_blank" style="display:inline;">
-                <button type="submit" class="btn">405 Method Not Allowed</button>
-            </form>
+            <button class="btn" onclick="test405()">405 Method Not Allowed</button>
+
             <!-- 413 Payload Too Large -->
             <button class="btn" onclick="testPayload()">413 Payload Too Large</button>
 
             <!-- 500 Internal Server Error -->
             <button class="btn" onclick="test500()">500 Server Error</button>
+        </div>
+
+        <!-- Test Upload & Delete Workflow -->
+        <div style="margin: 15px 0;">
+            <button class="btn" onclick="testUploadAndDelete()" style="background-color: #28a745; color: white;">
+                🧪 Test Upload (POST) & Delete Flow
+            </button>
+            <p id="delete-test-result" style="margin-top: 5px; font-weight: bold;"></p>
         </div>
     </div>
 
@@ -118,6 +125,63 @@
 
         function test500() {
             alert('To test 500 Internal Server Error, trigger an unhandled exception in your Java server code (e.g. throwing a RuntimeException inside a request handler) or handle a server-side crash scenario.');
+        }
+
+        function test405() {
+            fetch('/', {
+                method: 'PUT'
+            })
+                .then(response => response.text())
+                .then(html => {
+                    let win = window.open();
+                    win.document.write(html);
+                    win.document.close();
+                })
+                .catch(err => console.error(err));
+        }
+
+        async function testUploadAndDelete() {
+            const resultElement = document.getElementById('delete-test-result');
+            resultElement.innerText = "⏳ Step 1: Uploading/Creating test file via POST...";
+            resultElement.style.color = "orange";
+
+            try {
+                // POST request
+                let postResponse = await fetch('/uploads/test-file.txt', {
+                    method: 'POST',
+                    body: 'Hello, this is a test file for deletion audit.'
+                });
+
+                if (postResponse.ok || postResponse.status === 200 || postResponse.status === 201) {
+                    resultElement.innerText = "✅ Step 1 Success: File created. Now deleting via DELETE...";
+                    resultElement.style.color = "blue";
+
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+
+                    // DELETE request
+                    let deleteResponse = await fetch('/uploads/test-file.txt', {
+                        method: 'DELETE'
+                    });
+
+                    if (deleteResponse.ok) {
+                        let msg = await deleteResponse.text();
+                        resultElement.innerText = "🎉 Success! File uploaded and then deleted successfully. (" + msg + ")";
+                        resultElement.style.color = "green";
+                    } else {
+                        resultElement.innerText = "❌ Delete failed with status: " + deleteResponse.status;
+                        resultElement.style.color = "red";
+                    }
+
+                } else {
+                    resultElement.innerText = "❌ POST/Upload failed with status: " + postResponse.status;
+                    resultElement.style.color = "red";
+                }
+
+            } catch (error) {
+                console.error(error);
+                resultElement.innerText = "⚠️ Error during test execution: " + error.message;
+                resultElement.style.color = "red";
+            }
         }
     </script>
 </body>

@@ -16,11 +16,22 @@
     "routes": {
         "/": {
             "accepted_methods": [
-                "GET"
+                "GET",
+                "POST",
+                "DELETE"
             ],
             "root": "./public",
             "default_file": "index.html",
             "directory_listing": false
+        },
+        "/uploads": {
+            "accepted_methods": [
+                "GET",
+                "POST",
+                "DELETE"
+            ],
+            "root": "./uploads",
+            "directory_listing": true
         }
     }
 }
