@@ -75,28 +75,67 @@ public class Server {
 
         if (requestData.startsWith("GET")) {
             String[] lines = requestData.split("\r\n");
+            if (lines.length == 0) {
+                sendError(client, key, 400);
+                return;
+            }
+            
             String[] requestLineParts = lines[0].split(" ");
             String path = requestLineParts.length > 1 ? requestLineParts[1] : "/";
 
             String filePathStr = path.equals("/") ? "public/index.html" : "public" + path;
             java.nio.file.Path filePath = java.nio.file.Paths.get(filePathStr);
 
-            String responseBody = "";
-            String statusCode = "200 OK";
-
-            if (java.nio.file.Files.exists(filePath) && !java.nio.file.Files.isDirectory(filePath)) {
-                responseBody = new String(java.nio.file.Files.readAllBytes(filePath));
-            } else {
-                statusCode = "404 Not Found";
-                java.nio.file.Path errorPath = java.nio.file.Paths.get("error_pages/404.html");
-                if (java.nio.file.Files.exists(errorPath)) {
-                    responseBody = new String(java.nio.file.Files.readAllBytes(errorPath));
-                } else {
-                    responseBody = "<h1>404 Not Found</h1>";
-                }
+            if (java.nio.file.Files.exists(filePath) && java.nio.file.Files.isDirectory(filePath)) {
+                sendError(client, key, 403);
+                return;
             }
 
-            String httpResponse = "HTTP/1.1 " + statusCode + "\r\n" +
+            if (java.nio.file.Files.exists(filePath) && !java.nio.file.Files.isDirectory(filePath)) {
+                String responseBody = new String(java.nio.file.Files.readAllBytes(filePath));
+
+                String httpResponse = "HTTP/1.1 200 OK\r\n" +
+                                      "Content-Type: text/html; charset=UTF-8\r\n" +
+                                      "Content-Length: " + responseBody.getBytes().length + "\r\n" +
+                                      "Connection: close\r\n\r\n" +
+                                      responseBody;
+
+                client.write(ByteBuffer.wrap(httpResponse.getBytes()));
+                client.close();
+                key.cancel();
+                System.out.println("📤 Handled request for path: " + path + " -> Status: 200 OK");
+            } else {
+                sendError(client, key, 404);
+            }
+        } else {
+            sendError(client, key, 405);
+        }
+    }
+
+    private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
+        try {
+            String statusText = "";
+            String errorFilePath = "error_pages/" + statusCode + ".html";
+
+            switch (statusCode) {
+                case 400: statusText = "400 Bad Request"; break;
+                case 403: statusText = "403 Forbidden"; break;
+                case 405: statusText = "405 Method Not Allowed"; break;
+                case 413: statusText = "413 Payload Too Large"; break;
+                case 500: statusText = "500 Internal Server Error"; break;
+                default:  statusText = "404 Not Found"; errorFilePath = "error_pages/404.html"; break;
+            }
+
+            java.nio.file.Path errorPath = java.nio.file.Paths.get(errorFilePath);
+            String responseBody = "";
+
+            if (java.nio.file.Files.exists(errorPath)) {
+                responseBody = new String(java.nio.file.Files.readAllBytes(errorPath));
+            } else {
+                responseBody = "<h1>" + statusText + "</h1>";
+            }
+
+            String httpResponse = "HTTP/1.1 " + statusText + "\r\n" +
                                   "Content-Type: text/html; charset=UTF-8\r\n" +
                                   "Content-Length: " + responseBody.getBytes().length + "\r\n" +
                                   "Connection: close\r\n\r\n" +
@@ -105,7 +144,10 @@ public class Server {
             client.write(ByteBuffer.wrap(httpResponse.getBytes()));
             client.close();
             key.cancel();
-            System.out.println("📤 Handled request for path: " + path + " -> Status: " + statusCode);
+            System.out.println("❌ Sent error response: " + statusText);
+
+        } catch (IOException e) {
+            System.out.println("⚠️ Error sending error response: " + e.getMessage());
         }
     }
 }

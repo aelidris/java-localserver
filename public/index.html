@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Java Local Server</title>
+    <title>Java Local Server - Dashboard</title>
     <style>
         body {
             font-family: system-ui, -apple-system, sans-serif;
@@ -13,17 +13,20 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
+            min-height: 100vh;
             margin: 0;
+            padding: 20px;
         }
 
         .card {
             background-color: #1e293b;
-            padding: 2rem 3rem;
+            padding: 2rem;
             border-radius: 12px;
             box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
             text-align: center;
             border: 1px solid #334155;
+            max-width: 600px;
+            width: 100%;
         }
 
         h1 {
@@ -33,28 +36,90 @@
 
         p {
             color: #94a3b8;
-            font-size: 1.1rem;
+            font-size: 1rem;
+            margin-bottom: 1.5rem;
         }
 
-        .status {
-            display: inline-block;
-            background-color: #0284c7;
-            color: white;
-            padding: 0.4rem 1rem;
-            border-radius: 20px;
-            font-size: 0.9rem;
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-top: 1.5rem;
+        }
+
+        .btn {
+            background-color: #334155;
+            color: #f8fafc;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            text-decoration: none;
             font-weight: bold;
-            margin-top: 1rem;
+            font-size: 0.9rem;
+            border: 1px solid #475569;
+            transition: all 0.2s ease;
+            display: inline-block;
+            cursor: pointer;
+        }
+
+        .btn:hover {
+            background-color: #0284c7;
+            border-color: #38bdf8;
+            transform: translateY(-2px);
+        }
+
+        .btn-success {
+            background-color: #0284c7;
+            border-color: #38bdf8;
+            grid-column: 1 / -1;
         }
     </style>
 </head>
 
 <body>
     <div class="card">
-        <h1>🚀 Java NIO Server is Running!</h1>
-        <p>This response was served directly from your custom Java Web Server.</p>
-        <div class="status">HTTP/1.1 200 OK</div>
+        <h1>🚀 Java NIO Server Dashboard</h1>
+        <p>Test all server responses and error pages instantly below:</p>
+
+        <div class="grid">
+            <!-- 200 OK -->
+            <a href="/" class="btn btn-success">200 OK (Home)</a>
+
+            <!-- 403 Forbidden (Directory) -->
+            <a href="/images" class="btn" target="_blank">403 Forbidden</a>
+
+            <!-- 404 Not Found -->
+            <a href="/random-page-test" class="btn" target="_blank">404 Not Found</a>
+
+            <!-- 405 Method Not Allowed -->
+            <form action="/" method="POST" target="_blank" style="display:inline;">
+                <button type="submit" class="btn">405 Method Not Allowed</button>
+            </form>
+            <!-- 413 Payload Too Large -->
+            <button class="btn" onclick="testPayload()">413 Payload Too Large</button>
+
+            <!-- 500 Internal Server Error -->
+            <button class="btn" onclick="test500()">500 Server Error</button>
+        </div>
     </div>
+
+    <script>
+        function testPost() {
+            fetch('/', { method: 'POST' })
+                .then(res => res.text().then(html => {
+                    document.open();
+                    document.write(html);
+                    document.close();
+                }));
+        }
+
+        function testPayload() {
+            alert('To test 413, use curl or send a huge POST body via script/Postman as configured in config.json.');
+        }
+
+        function test500() {
+            alert('To test 500 Internal Server Error, trigger an unhandled exception in your Java server code (e.g. throwing a RuntimeException inside a request handler) or handle a server-side crash scenario.');
+        }
+    </script>
 </body>
 
 </html>
