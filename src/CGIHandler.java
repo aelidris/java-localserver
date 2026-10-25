@@ -30,6 +30,48 @@ public class CGIHandler {
             this.startedAt = System.nanoTime();
         }
 
+        /**
+         * Returns null while running, then returns stdout once. Call regularly from
+         * the event loop to enforce the five-second and combined 2 MiB output limits.
+         * These are polling limits, not OS-enforced disk quotas.
+         */
+        public byte[] pollOutput() throws IOException {
+            if (finished) {
+                throw new IllegalStateException("CGI job is already finished");
+            }
+            try {
+                if (System.nanoTime() - startedAt >= TIMEOUT_NANOS) {
+                    throw new IOException("CGI execution timed out");
+                }
+                long errorBytes = Files.size(errorFile);
+                if (Files.size(outputFile) > MAX_OUTPUT_BYTES - errorBytes) {
+                    throw new IOException("CGI output limit exceeded");
+                }
+                if (process.isAlive()) {
+                    return null;
+                }
+                if (process.exitValue() != 0) {
+                    throw new IOException("CGI process exited with code " + process.exitValue());
+                }
+                byte[] output;
+                try (var stream = Files.newInputStream(outputFile)) {
+                    output = stream.readNBytes((int) MAX_OUTPUT_BYTES + 1);
+                }
+                if (output.length > MAX_OUTPUT_BYTES - Files.size(errorFile)) {
+                    throw new IOException("CGI output limit exceeded");
+                }
+                close();
+                return output;
+            } catch (IOException | RuntimeException failure) {
+                try {
+                    close();
+                } catch (IOException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
+            }
+        }
+
         @Override
         public void close() throws IOException {
             finished = true;
