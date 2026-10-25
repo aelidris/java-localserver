@@ -12,11 +12,13 @@ import java.util.Set;
 public class Server {
     private final ConfigLoader configLoader;
     private final Router router;
+    private final error errorHandler;
     private Selector selector;
 
     public Server(ConfigLoader configLoader) {
         this.configLoader = configLoader;
         this.router = new Router(configLoader);
+        this.errorHandler = new error(configLoader);
     }
 
     public void start() throws IOException {
@@ -216,60 +218,12 @@ public class Server {
 
     private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
         try {
-            String statusText = "";
-            switch (statusCode) {
-                case 400:
-                    statusText = "400 Bad Request";
-                    break;
-                case 403:
-                    statusText = "403 Forbidden";
-                    break;
-                case 404:
-                    statusText = "404 Not Found";
-                    break;
-                case 405:
-                    statusText = "405 Method Not Allowed";
-                    break;
-                case 413:
-                    statusText = "413 Payload Too Large";
-                    break;
-                case 500:
-                    statusText = "500 Internal Server Error";
-                    break;
-                default:
-                    statusText = "404 Not Found";
-                    statusCode = 404;
-                    break;
-            }
-
-            // Get error page path dynamically from ConfigLoader
-            String errorFilePath = configLoader.getErrorPagePath(statusCode);
-            if (errorFilePath == null) {
-                errorFilePath = "error_pages/" + statusCode + ".html";
-            }
-
-            Path errorPath = Paths.get(errorFilePath);
-            String responseBody = "";
-
-            if (Files.exists(errorPath)) {
-                responseBody = new String(Files.readAllBytes(errorPath));
-            } else {
-                responseBody = "<h1>" + statusText + "</h1>";
-            }
-
-            String httpResponse = "HTTP/1.1 " + statusText + "\r\n" +
-                    "Content-Type: text/html; charset=UTF-8\r\n" +
-                    "Content-Length: " + responseBody.getBytes().length + "\r\n" +
-                    "Connection: close\r\n\r\n" +
-                    responseBody;
-
-            client.write(ByteBuffer.wrap(httpResponse.getBytes()));
+            errorHandler.sendError(client, key, statusCode);
             client.close();
             key.cancel();
-            System.out.println("❌ Sent error response: " + statusText);
-
+            System.out.println("❌ Sent error response: " + statusCode);
         } catch (IOException e) {
-            System.out.println("⚠️ Error sending error response: " + e.getMessage());
+            System.out.println("⚠️ Error closing client after error: " + e.getMessage());
         }
     }
 }

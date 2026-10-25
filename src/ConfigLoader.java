@@ -88,48 +88,45 @@ public class ConfigLoader {
                 }
             }
 
-            // Parse Routes (Basic extraction for root `/`)
+            // Parse Routes (/ and /uploads)
             if (content.contains("\"routes\"")) {
-                // Parse Routes (/ and /uploads)
-                if (content.contains("\"routes\"")) {
-                    // Parse Root Route "/"
-                    RouteConfig defaultRoute = new RouteConfig();
-                    if (content.contains("\"/\"")) {
-                        int rootIndex = content.indexOf("\"/\"");
-                        int amIndex = content.indexOf("\"accepted_methods\"", rootIndex);
-                        if (amIndex != -1) {
-                            int bracketStart = content.indexOf("[", amIndex);
-                            int bracketEnd = content.indexOf("]", bracketStart);
-                            String methodsStr = content.substring(bracketStart + 1, bracketEnd);
-                            String[] methods = methodsStr.split(",");
-                            defaultRoute.acceptedMethods.clear();
-                            for (String m : methods) {
-                                defaultRoute.acceptedMethods.add(m.replace("\"", "").trim());
-                            }
+                // Parse Root Route "/"
+                RouteConfig defaultRoute = new RouteConfig();
+                if (content.contains("\"/\"")) {
+                    int rootIndex = content.indexOf("\"/\"");
+                    int amIndex = content.indexOf("\"accepted_methods\"", rootIndex);
+                    if (amIndex != -1) {
+                        int bracketStart = content.indexOf("[", amIndex);
+                        int bracketEnd = content.indexOf("]", bracketStart);
+                        String methodsStr = content.substring(bracketStart + 1, bracketEnd);
+                        String[] methods = methodsStr.split(",");
+                        defaultRoute.acceptedMethods.clear();
+                        for (String m : methods) {
+                            defaultRoute.acceptedMethods.add(m.replace("\"", "").trim());
                         }
                     }
-                    routes.put("/", defaultRoute);
+                }
+                routes.put("/", defaultRoute);
 
-                    // Parse Uploads Route "/uploads"
-                    if (content.contains("\"/uploads\"")) {
-                        RouteConfig uploadsRoute = new RouteConfig();
-                        uploadsRoute.root = "./uploads"; // Explicit root for uploads
-                        uploadsRoute.directoryListing = true;
+                // Parse Uploads Route "/uploads"
+                if (content.contains("\"/uploads\"")) {
+                    RouteConfig uploadsRoute = new RouteConfig();
+                    uploadsRoute.root = "./uploads"; // Explicit root for uploads
+                    uploadsRoute.directoryListing = true;
 
-                        int uploadsIndex = content.indexOf("\"/uploads\"");
-                        int amIndex = content.indexOf("\"accepted_methods\"", uploadsIndex);
-                        if (amIndex != -1) {
-                            int bracketStart = content.indexOf("[", amIndex);
-                            int bracketEnd = content.indexOf("]", bracketStart);
-                            String methodsStr = content.substring(bracketStart + 1, bracketEnd);
-                            String[] methods = methodsStr.split(",");
-                            uploadsRoute.acceptedMethods.clear();
-                            for (String m : methods) {
-                                uploadsRoute.acceptedMethods.add(m.replace("\"", "").trim());
-                            }
+                    int uploadsIndex = content.indexOf("\"/uploads\"");
+                    int amIndex = content.indexOf("\"accepted_methods\"", uploadsIndex);
+                    if (amIndex != -1) {
+                        int bracketStart = content.indexOf("[", amIndex);
+                        int bracketEnd = content.indexOf("]", bracketStart);
+                        String methodsStr = content.substring(bracketStart + 1, bracketEnd);
+                        String[] methods = methodsStr.split(",");
+                        uploadsRoute.acceptedMethods.clear();
+                        for (String m : methods) {
+                            uploadsRoute.acceptedMethods.add(m.replace("\"", "").trim());
                         }
-                        routes.put("/uploads", uploadsRoute);
                     }
+                    routes.put("/uploads", uploadsRoute);
                 }
             }
 

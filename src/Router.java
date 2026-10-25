@@ -48,11 +48,17 @@ public class Router {
             return new RequestResult(RouteStatus.METHOD_NOT_ALLOWED, null, false);
         }
 
+        // Security Protection: Prevent POST/DELETE directly on root index.html to avoid
+        // overwriting content
+        if (method.equals("POST") && !pathWithoutQuery.startsWith("/uploads")) {
+            return new RequestResult(RouteStatus.METHOD_NOT_ALLOWED, null, false);
+        }
+
         // Resolve file path based on root and URI
-        String relativePath = pathWithoutQuery.startsWith("/uploads") 
-            ? pathWithoutQuery.substring(8) // كيحيد "/uploads" باش ميبقاش التكرار
-            : (pathWithoutQuery.equals("/") ? "/" + routeConfig.defaultFile : pathWithoutQuery);
-            
+        String relativePath = pathWithoutQuery.startsWith("/uploads")
+                ? pathWithoutQuery.substring(8) // كيحيد "/uploads" باش ميبقاش التكرار
+                : (pathWithoutQuery.equals("/") ? "/" + routeConfig.defaultFile : pathWithoutQuery);
+
         if (relativePath.isEmpty() || relativePath.equals("/")) {
             relativePath = "/" + (routeConfig.defaultFile != null ? routeConfig.defaultFile : "");
         }
@@ -84,11 +90,8 @@ public class Router {
 
         // Handle specific methods logic (GET, POST, DELETE)
         if (method.equals("POST")) {
-            // POST logic handler placeholder (body size check will be handled in
-            // Server/Body reader)
             return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
         } else if (method.equals("DELETE")) {
-            // DELETE logic handler placeholder
             return handleDeleteMapping(fullPath);
         }
 
