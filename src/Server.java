@@ -5,8 +5,10 @@ import java.nio.channels.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class Server {
@@ -14,6 +16,11 @@ public class Server {
     private final Router router;
     private final error errorHandler;
     private Selector selector;
+
+    // Map to track last activity time for each client connection (for timeout
+    // handling)
+    private final Map<SocketChannel, Long> clientLastActiveTime = new HashMap<>();
+    private static final long TIMEOUT_MS = 60000; // 60 seconds timeout
 
     public Server(ConfigLoader configLoader) {
         this.configLoader = configLoader;
@@ -34,10 +41,19 @@ public class Server {
             System.out.println("🚀 Server listening on " + host + ":" + port);
         }
 
-        System.out.println("⚡ Single-thread NIO Event Loop started successfully.");
+        System.out.println("⚡ Single-thread NIO Event Loop started with 60s Timeout.");
 
         while (true) {
-            selector.select();
+            // Wake up every 1 second to check for timed-out connections
+            int readyChannels = selector.select(1000);
+
+            // Check and close inactive connections
+            checkTimeouts();
+
+            if (readyChannels == 0) {
+                continue;
+            }
+
             Set<SelectionKey> selectedKeys = selector.selectedKeys();
             Iterator<SelectionKey> iterator = selectedKeys.iterator();
 
@@ -62,18 +78,23 @@ public class Server {
         SocketChannel client = server.accept();
         client.configureBlocking(false);
         client.register(selector, SelectionKey.OP_READ);
+
+        // Record connection time
+        clientLastActiveTime.put(client, System.currentTimeMillis());
         System.out.println("🔗 Accepted new connection from: " + client.getRemoteAddress());
     }
 
     private void readData(SelectionKey key) throws IOException {
         SocketChannel client = (SocketChannel) key.channel();
+
+        // Refresh last active time on new data
+        clientLastActiveTime.put(client, System.currentTimeMillis());
+
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         int bytesRead = client.read(buffer);
 
         if (bytesRead == -1) {
-            System.out.println("🔌 Client disconnected.");
-            client.close();
-            key.cancel();
+            closeClient(client, key, "🔌 Client disconnected.");
             return;
         }
 
@@ -150,6 +171,46 @@ public class Server {
         }
     }
 
+    private void checkTimeouts() {
+        long currentTime = System.currentTimeMillis();
+        Iterator<Map.Entry<SocketChannel, Long>> iterator = clientLastActiveTime.entrySet().iterator();
+
+        while (iterator.hasNext()) {
+            Map.Entry<SocketChannel, Long> entry = iterator.next();
+            SocketChannel client = entry.getKey();
+            long lastActive = entry.getValue();
+
+            if (currentTime - lastActive > TIMEOUT_MS) {
+                try {
+                    System.out.println(
+                            "⏰ Connection timeout reached. Closing inactive client: " + client.getRemoteAddress());
+                } catch (IOException e) {
+                    System.out.println("⏰ Connection timeout reached. Closing inactive client.");
+                }
+
+                try {
+                    client.close();
+                } catch (IOException ignored) {
+                }
+
+                iterator.remove();
+            }
+        }
+    }
+
+    private void closeClient(SocketChannel client, SelectionKey key, String logMessage) {
+        try {
+            System.out.println(logMessage);
+            clientLastActiveTime.remove(client);
+            client.close();
+            if (key != null) {
+                key.cancel();
+            }
+        } catch (IOException e) {
+            System.out.println("⚠️ Error closing client: " + e.getMessage());
+        }
+    }
+
     private String extractRequestBody(String requestData) {
         int bodyIndex = requestData.indexOf("\r\n\r\n");
         if (bodyIndex != -1 && bodyIndex + 4 < requestData.length()) {
@@ -188,9 +249,7 @@ public class Server {
                 buffer.flip();
 
                 client.write(buffer);
-                client.close();
-                key.cancel();
-                System.out.println("📤 Handled request -> Status: 200 OK");
+                closeClient(client, key, "📤 Handled request -> Status: 200 OK");
             } else {
                 sendError(client, key, 404);
             }
@@ -208,10 +267,8 @@ public class Server {
                     message;
 
             client.write(ByteBuffer.wrap(httpResponse.getBytes()));
-            client.close();
-            key.cancel();
-            System.out.println("📤 Sent response: " + statusCode);
-        } catch (IOException e) {
+            closeClient(client, key, "📤 Sent response: " + statusCode);
+        } catch (Exception e) {
             System.out.println("⚠️ Error sending response: " + e.getMessage());
         }
     }
@@ -219,11 +276,9 @@ public class Server {
     private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
         try {
             errorHandler.sendError(client, key, statusCode);
-            client.close();
-            key.cancel();
-            System.out.println("❌ Sent error response: " + statusCode);
-        } catch (IOException e) {
-            System.out.println("⚠️ Error closing client after error: " + e.getMessage());
+            closeClient(client, key, "❌ Sent error response: " + statusCode);
+        } catch (Exception e) {
+            System.out.println("⚠️ Error sending error response: " + e.getMessage());
         }
     }
 }
