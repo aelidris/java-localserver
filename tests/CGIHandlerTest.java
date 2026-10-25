@@ -52,10 +52,63 @@ public class CGIHandlerTest {
                 checks++;
             }
             checkClean();
+            testResponses(script);
             System.out.println("Passed " + checks + " CGI checks");
         } finally {
             Files.deleteIfExists(script);
         }
+    }
+
+    private static void testResponses(Path script) throws Exception {
+        byte[] header = ("Status: 201 Created\r\nContent-Type: application/octet-stream\r\n"
+                + "Set-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 999\r\n\r\n")
+                .getBytes(StandardCharsets.ISO_8859_1);
+        byte[] raw = Arrays.copyOf(header, header.length + 3);
+        raw[header.length] = (byte) 255;
+        raw[header.length + 1] = 0;
+        raw[header.length + 2] = 10;
+        var response = CGIHandler.parseResponse(raw);
+        check(response.statusCode == 201, "explicit CGI status");
+        check(response.headers.get("set-cookie").equals(List.of("a=1", "b=2")), "repeated cookies");
+        check(!response.headers.containsKey("Content-Length"), "discard script framing");
+        check(Arrays.equals(response.getBody(), new byte[] { (byte) 255, 0, 10 }), "binary response");
+        check(parse("Content-Type: text/plain\n\nhello").statusCode == 200, "LF default status");
+        check(parse("Location: https://example.com/\n\n").statusCode == 302, "redirect status");
+        check(parse("Status: 204 No Content\n\n").getBody().length == 0, "empty response");
+        for (String invalid : List.of("", "Content-Type: text/plain", "Broken\n\n",
+                "Status: 999 Nope\n\n", "Status: 200 OK\nStatus: 201 Created\n\n",
+                "Content-Type: text/plain\nTransfer-Encoding: chunked\n\n",
+                "Content-Type: text/plain\nConnection: close\n\n",
+                "Content-Type: text/plain\nX-Test: bad\rvalue\n\n",
+                "Content-Type: text/plain\nX-Test: bad\u0000\n\n",
+                "Content-Type: text/plain\nContent-Type: text/html\n\n",
+                "X-Test: value\n\nbody", "Status: 204 No Content\n\nbody",
+                "Content-Type: text/plain\nX-Test: " + "x".repeat(16384) + "\n\n")) {
+            try {
+                parse(invalid);
+                throw new AssertionError("Invalid response accepted");
+            } catch (IOException expected) {
+                checks++;
+            }
+        }
+        Files.writeString(script, "printf 'Content-Type: text/plain\\n\\nhello'\n");
+        try (var job = start(script)) {
+            CGIHandler.Response result = null;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+            while (result == null && System.nanoTime() < deadline) {
+                result = job.poll();
+                if (result == null) {
+                    Thread.sleep(10);
+                }
+            }
+            check(result != null && Arrays.equals(result.getBody(), "hello".getBytes(StandardCharsets.UTF_8)),
+                    "script to parsed response");
+        }
+        checkClean();
+    }
+
+    private static CGIHandler.Response parse(String value) throws IOException {
+        return CGIHandler.parseResponse(value.getBytes(StandardCharsets.ISO_8859_1));
     }
 
     private static CGIHandler.Job start(Path script) throws IOException {

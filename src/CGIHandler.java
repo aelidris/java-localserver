@@ -1,16 +1,115 @@
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
 public class CGIHandler {
 
     private static final long TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
     private static final long MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+    private static final int MAX_HEADER_BYTES = 16 * 1024;
+
+    /** Parsed CGI response. The HTTP writer must supply its own framing headers. */
+    public static class Response {
+        public final int statusCode;
+        public final Map<String, List<String>> headers;
+        private final byte[] body;
+
+        private Response(int statusCode, Map<String, List<String>> headers, byte[] body) {
+            this.statusCode = statusCode;
+            Map<String, List<String>> copy = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            headers.forEach((name, values) -> copy.put(name, List.copyOf(values)));
+            this.headers = Collections.unmodifiableMap(copy);
+            this.body = body;
+        }
+
+        public byte[] getBody() {
+            return body.clone();
+        }
+    }
+
+    /** Parses CRLF or LF headers while preserving binary bodies and repeated cookies. */
+    public static Response parseResponse(byte[] output) throws IOException {
+        Objects.requireNonNull(output, "output");
+        if (output.length > MAX_OUTPUT_BYTES) {
+            throw new IOException("CGI output limit exceeded");
+        }
+        int headerEnd = -1;
+        int bodyStart = -1;
+        for (int i = 0; i < output.length && i <= MAX_HEADER_BYTES; i++) {
+            if (i + 3 < output.length && output[i] == '\r' && output[i + 1] == '\n'
+                    && output[i + 2] == '\r' && output[i + 3] == '\n') {
+                headerEnd = i;
+                bodyStart = i + 4;
+                break;
+            }
+            if (i + 1 < output.length && output[i] == '\n' && output[i + 1] == '\n') {
+                headerEnd = i;
+                bodyStart = i + 2;
+                break;
+            }
+        }
+        if (headerEnd < 0) {
+            throw new IOException("Missing or oversized CGI response headers");
+        }
+        String headerText = new String(output, 0, headerEnd, StandardCharsets.ISO_8859_1);
+        Map<String, List<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        int status = 200;
+        boolean hasStatus = false;
+        for (String line : headerText.split("\r?\n", -1)) {
+            int colon = line.indexOf(':');
+            if (colon <= 0) {
+                throw new IOException("Malformed CGI response header");
+            }
+            String name = line.substring(0, colon);
+            String rawValue = line.substring(colon + 1);
+            if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+                    || rawValue.chars().anyMatch(c -> (c < 32 && c != '\t') || c == 127)) {
+                throw new IOException("Invalid CGI response header");
+            }
+            String value = rawValue.trim();
+            if (name.equalsIgnoreCase("Status")) {
+                if (hasStatus || !value.matches("[2-5][0-9]{2}( [\\x20-\\x7e]*)?")) {
+                    throw new IOException("Invalid CGI status");
+                }
+                status = Integer.parseInt(value.substring(0, 3));
+                hasStatus = true;
+            } else if (name.equalsIgnoreCase("Content-Length")) {
+                // The HTTP writer calculates the actual byte length from getBody().
+                continue;
+            } else if (List.of("connection", "transfer-encoding", "keep-alive", "upgrade",
+                    "trailer", "te", "proxy-authenticate", "proxy-authorization")
+                    .contains(name.toLowerCase(java.util.Locale.ROOT))) {
+                throw new IOException("CGI response contains a hop-by-hop header");
+            } else {
+                if ((name.equalsIgnoreCase("Content-Type") || name.equalsIgnoreCase("Location"))
+                        && (value.isEmpty() || headers.containsKey(name))) {
+                    throw new IOException("Invalid or duplicate CGI " + name);
+                }
+                headers.computeIfAbsent(name, ignored -> new ArrayList<>()).add(value);
+            }
+        }
+        if (!hasStatus && headers.containsKey("Location")) {
+            status = 302;
+        }
+        byte[] body = Arrays.copyOfRange(output, bodyStart, output.length);
+        if (status == 204 || status == 304) {
+            if (body.length != 0) {
+                throw new IOException("CGI status does not permit a response body");
+            }
+        } else if (!headers.containsKey("Content-Type") && !headers.containsKey("Location")) {
+            throw new IOException("CGI response is missing Content-Type");
+        }
+        return new Response(status, headers, body);
+    }
 
     /** A running CGI process. Close it when its client disconnects. */
     public static class Job implements AutoCloseable {
@@ -70,6 +169,12 @@ public class CGIHandler {
                 }
                 throw failure;
             }
+        }
+
+        /** Returns null while running, otherwise a parsed response, exactly once. */
+        public Response poll() throws IOException {
+            byte[] output = pollOutput();
+            return output == null ? null : parseResponse(output);
         }
 
         @Override
