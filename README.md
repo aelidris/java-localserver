@@ -6,7 +6,7 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 
 - **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
 - **HTTP/1.1 Protocol Compliance:** Full support for `GET`, `POST`, and `DELETE` methods, chunked/unchunked request management, and robust status code handling.
-- **Dynamic Content via CGI:** Executes external scripts (e.g., Python) using `ProcessBuilder` with environment variable mapping (`PATH_INFO`).
+- **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
 - **Configuration Engine:** JSON-based configuration supporting host/port binding, custom routes, redirection, directory listings, and body size limits.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
 - **Robust Error Handling & Safety:** Default custom HTML error pages for `400`, `403`, `404`, `405`, `413`, and `500` errors, designed to prevent crashes, memory leaks, and file descriptor exhaustion.
@@ -33,3 +33,62 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 ├── error_pages/          # Custom HTML error response files
 └── README.md
 ```
+
+## CGI handler usage
+
+`CGIHandler.start` launches an authorized script with a complete request body.
+Pass the interpreter as separate arguments; no shell command is constructed.
+The caller must validate the script path, allowed HTTP method, and request body
+size before starting it. Never execute scripts from an untrusted upload directory.
+
+```java
+CGIHandler.Job job = CGIHandler.start(
+    Path.of("cgi/hello.py"),
+    List.of("python3"),
+    Map.of("REQUEST_METHOD", "POST",
+           "SCRIPT_NAME", "/cgi/hello.py",
+           "QUERY_STRING", "name=world",
+           "PATH_INFO", "",
+           "CONTENT_TYPE", "text/plain",
+           "SERVER_NAME", "localhost",
+           "SERVER_PORT", "8080"),
+    requestBody);
+
+// Keep the job with the connection and poll it on subsequent event-loop ticks.
+CGIHandler.Response response = job.poll();
+if (response != null) {
+    byte[] body = response.getBody();
+    // Write statusCode, headers, your own Content-Length, and body to the client.
+}
+```
+
+Use `java.nio.file.Path`, `java.util.List`, and `java.util.Map` for this example.
+`requestBody` is the complete request as a byte array. The handler calculates
+`CONTENT_LENGTH` from those bytes. Polling returns `null` while the process is
+running and delivers the response once; polling a finished or cancelled job fails.
+Always call `job.close()` if the client disconnects or request handling is abandoned.
+Completion and failures clean up temporary input, output, and error files.
+Map execution/parsing failures (`IOException`) to an appropriate HTTP error.
+
+Jobs have a five-second timeout and a combined 2 MiB stdout/stderr limit, checked
+on each poll. Poll regularly even when no sockets are ready. These checks are not
+OS resource quotas: a script can exceed the disk limit between polls. Scripts are
+trusted programs running with the server's permissions and inherited environment.
+
+Response parsing accepts LF or CRLF headers, optional `Status`, repeated headers
+such as `Set-Cookie`, and binary bodies. Headers are limited to 16 KiB. A `Location`
+without `Status` produces a 302 client redirect; internal CGI redirects and NPH
+scripts are not implemented. Script-supplied `Content-Length` is discarded and
+hop-by-hop headers are rejected. The HTTP writer must supply framing and handle
+partial socket writes. Connecting jobs to HTTP routing and connection lifecycle
+management remains a separate server integration step.
+
+Run the standalone CGI regression checks with a JDK 11+ and POSIX shell utilities:
+
+```bash
+bash test-cgi.sh
+```
+
+The checks exercise environment variables, binary input/output, process failures,
+timeouts, stdout/stderr limits, cancellation, cleanup, and response parsing without
+starting the HTTP server.
