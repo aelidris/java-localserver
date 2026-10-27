@@ -93,9 +93,9 @@ public class ConfigLoader {
             }
             Map<String, RouteConfig> newRoutes = new HashMap<>();
             for (Map.Entry<String, Object> entry : routeValues.entrySet()) {
-                String routeName = entry.getKey();
-                if (!routeName.equals("/") && !routeName.equals("/uploads")) {
-                    throw invalid("routes." + routeName, "is not supported yet; supported routes are '/' and '/uploads'");
+                String routeName = normalizeRouteName(entry.getKey());
+                if (newRoutes.containsKey(routeName)) {
+                    throw invalid("routes." + entry.getKey(), "duplicates route '" + routeName + "'");
                 }
                 newRoutes.put(routeName, route(entry.getValue(), routeName));
             }
@@ -114,6 +114,21 @@ public class ConfigLoader {
         } catch (IllegalArgumentException e) {
             throw new ConfigException("Invalid configuration '" + configPath + "': " + e.getMessage(), e);
         }
+    }
+
+    private static String normalizeRouteName(String name) {
+        String field = "routes." + name;
+        if (!name.startsWith("/") || name.contains("//") || name.contains("?") || name.contains("#")
+                || name.contains("\\") || name.contains("%")
+                || name.chars().anyMatch(c -> Character.isWhitespace(c) || Character.isISOControl(c))) {
+            throw invalid(field, "must be an absolute URL path without query, fragment, escapes, or empty segments");
+        }
+        for (String segment : name.split("/")) {
+            if (segment.equals(".") || segment.equals("..")) {
+                throw invalid(field, "must not contain '.' or '..' segments");
+            }
+        }
+        return name.length() > 1 && name.endsWith("/") ? name.substring(0, name.length() - 1) : name;
     }
 
     private static RouteConfig route(Object value, String name) {
@@ -207,4 +222,5 @@ public class ConfigLoader {
     public long getMaxBodySize() { return maxBodySize; }
     public String getErrorPagePath(int errorCode) { return errorPages.get(errorCode); }
     public RouteConfig getRouteConfig(String path) { return routes.get(path); }
+    public Set<String> getRoutePaths() { return Set.copyOf(routes.keySet()); }
 }

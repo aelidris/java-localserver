@@ -161,6 +161,9 @@ public class Server {
                     sendFile(key, result.filePath);
                 }
                 break;
+            case BAD_REQUEST:
+                sendError(key, 400);
+                break;
             case METHOD_NOT_ALLOWED:
                 sendError(key, 405);
                 break;

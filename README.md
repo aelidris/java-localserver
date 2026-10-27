@@ -7,7 +7,7 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 - **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
 - **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` and chunked requests. Full HTTP/1.1 compliance remains in progress.
 - **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
-- **Configuration Engine:** Validated JSON configuration for host/ports, body limits, error page paths, and the currently supported `/` and `/uploads` routes. Arbitrary routes, redirections, and directory listing responses remain in progress.
+- **Configuration Engine:** Validated JSON configuration for host/ports, body limits, error page paths, and custom routes with per-route roots and methods. Redirections and directory listing responses remain in progress.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
 - **Robust Error Handling & Safety:** Default custom HTML error pages for `400`, `403`, `404`, `405`, `413`, and `500` errors, designed to prevent crashes, memory leaks, and file descriptor exhaustion.
 
@@ -49,16 +49,20 @@ nesting to 32 levels. Parsing uses Java Core only.
   guarantee that a given JVM has enough memory for that size.
 - `error_pages`: an object mapping codes 400–599 to non-empty filesystem paths.
   Missing or unreadable error page files still use the built-in HTML fallback.
-- `routes`: currently accepts `/` and `/uploads`, and must include `/` when supplied.
+- `routes`: accepts custom path prefixes and must include `/` when supplied.
   Each route requires a non-empty `accepted_methods` list containing distinct
   `GET`, `POST`, or `DELETE` values. `root`, `default_file`, and the boolean
   `directory_listing` are read from the file. Default files must stay relative
-  to the route root. Other route names/options are rejected until implemented.
+  to the route root. Prefixes start with `/` and cannot contain query strings,
+  fragments, percent escapes, whitespace, empty segments, or `.`/`..` segments.
+  A trailing slash is removed; `/api` and `/api/` cannot both be configured.
+  Unsupported options are rejected.
 
 With `routes` omitted, `/` serves `./public/index.html` with `GET` allowed.
-For declared routes, omitted roots default to `./public` or `./uploads`, and
-`default_file` defaults to `index.html`. The listing flag defaults to false for
-`/` and true for `/uploads`; generating directory listings is still pending.
+For declared routes, an omitted root defaults to `./public` (`./uploads` for the
+existing `/uploads` route), and `default_file` defaults to `index.html`. The
+listing flag defaults to false except for `/uploads`; generating directory
+listings is still pending.
 Filesystem paths remain relative to the working directory. Upload directories
 may be absent at startup and are created on upload. Configuration is applied
 only after all fields pass validation.
@@ -67,6 +71,45 @@ Run the configuration and startup-failure checks:
 
 ```bash
 bash test-config.sh
+```
+
+## Custom routes
+
+The longest matching prefix wins at a path-segment boundary: `/assets/private`
+takes precedence over `/assets`, while `/assets-old` falls back to `/`. Query
+strings do not affect matching. The matched prefix is stripped before resolving
+the remainder under that route's root. Matching is case-sensitive and uses
+literal URL paths; percent-decoding of request paths is not implemented yet.
+
+For example, use this `routes` object to serve static content and allow uploads
+under a separate prefix:
+
+```json
+{
+  "routes": {
+    "/": { "root": "./public", "accepted_methods": ["GET"] },
+    "/assets": { "root": "./static", "accepted_methods": ["GET"] },
+    "/assets/private": { "root": "./private", "accepted_methods": ["GET"] },
+    "/files": { "root": "./storage", "accepted_methods": ["GET", "POST", "DELETE"] }
+  }
+}
+```
+
+`GET /assets/logo.png` resolves to `./static/logo.png`. Each selected route's
+`accepted_methods` controls access, including POST and DELETE; a denied method
+does not fall back to a less specific route. POST is no longer restricted to
+the name `/uploads`. For read-only content, configure `accepted_methods: ["GET"]`.
+
+GET directory requests use `default_file`, including nested directories. An
+existing file can also be a route root, served only at the mount itself (with
+an optional trailing slash). POST and DELETE cannot target directories. Dot
+segments and resolved symlinks leading outside a directory root are rejected.
+Directory listing responses and redirections remain separate implementation steps.
+
+Run the routing regression checks:
+
+```bash
+bash test-routing.sh
 ```
 
 ## Request receiving

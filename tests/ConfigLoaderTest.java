@@ -48,6 +48,23 @@ public class ConfigLoaderTest {
             check(load("{\"ports\":[1,65535],\"client_max_body_size\":2147483639}").getPorts().size() == 2,
                     "numeric upper and lower boundaries");
             check(load("{\"ports\":[8e3]}").getPorts().equals(List.of(8000)), "JSON exponent notation");
+            ConfigLoader customRoutes = load("{\"routes\":{\"/\":{\"accepted_methods\":[\"GET\"]},"
+                    + "\"/assets/icons/\":{\"accepted_methods\":[\"GET\"],\"root\":\"./icons\"}}}");
+            check(customRoutes.getRouteConfig("/assets/icons").root.equals("./icons"), "custom route and trailing slash normalization");
+            check(customRoutes.getRoutePaths().contains("/assets/icons"), "route prefixes exposed for matching");
+            try {
+                customRoutes.getRoutePaths().clear();
+                throw new AssertionError("Route paths can be changed outside validation");
+            } catch (UnsupportedOperationException expected) {
+                checks++;
+            }
+            for (String name : new String[] {"api", "", "//api", "/api//v1", "/api/../x", "/api/./x",
+                    "/api?x", "/api#x", "/api%2fx", "/api x"}) {
+                reject("{\"routes\":{\"/\":{\"accepted_methods\":[\"GET\"]},\"" + name
+                        + "\":{\"accepted_methods\":[\"GET\"]}}}", "routes.");
+            }
+            reject("{\"routes\":{\"/\":{\"accepted_methods\":[\"GET\"]},"
+                    + "\"/api\":{\"accepted_methods\":[\"GET\"]},\"/api/\":{\"accepted_methods\":[\"GET\"]}}}", "duplicates route");
 
             for (String value : new String[] {"[]", "null", "\"8080\"", "[0]", "[-1]", "[65536]", "[1.5]",
                     "[\"8080\"]", "[true]", "[null]", "[8080,8080]", "[9999999999999999999999]"}) {
