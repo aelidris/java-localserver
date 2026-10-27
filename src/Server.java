@@ -2,6 +2,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -69,6 +70,8 @@ public class Server {
                         acceptConnection(key);
                     } else if (key.isReadable()) {
                         readData(key);
+                    } else if (key.isWritable()) {
+                        writeData(key);
                     }
                 } catch (IOException | RuntimeException e) {
                     if (key.channel() instanceof SocketChannel) {
@@ -124,7 +127,7 @@ public class Server {
                 return;
             }
         } catch (HttpRequestReader.RequestException e) {
-            sendError(client, key, e.statusCode);
+            sendError(key, e.statusCode);
             return;
         }
 
@@ -139,7 +142,7 @@ public class Server {
         switch (result.status) {
             case OK:
                 if (method.equals("DELETE")) {
-                    sendResponse(client, key, 200, "File deleted successfully.");
+                    sendResponse(key, 200, "File deleted successfully.");
                 } else if (method.equals("POST")) {
                     try {
                         Path filePath = Paths.get(result.filePath);
@@ -150,29 +153,29 @@ public class Server {
 
                         Files.write(filePath, request.getBody());
 
-                        sendResponse(client, key, 201, "File uploaded successfully.");
+                        sendResponse(key, 201, "File uploaded successfully.");
                     } catch (IOException e) {
-                        sendError(client, key, 500);
+                        sendError(key, 500);
                     }
                 } else {
-                    sendFile(client, key, result.filePath);
+                    sendFile(key, result.filePath);
                 }
                 break;
             case METHOD_NOT_ALLOWED:
-                sendError(client, key, 405);
+                sendError(key, 405);
                 break;
             case FORBIDDEN:
-                sendError(client, key, 403);
+                sendError(key, 403);
                 break;
             case NOT_FOUND:
-                sendError(client, key, 404);
+                sendError(key, 404);
                 break;
             case PAYLOAD_TOO_LARGE:
-                sendError(client, key, 413);
+                sendError(key, 413);
                 break;
             case INTERNAL_SERVER_ERROR:
             default:
-                sendError(client, key, 500);
+                sendError(key, 500);
                 break;
         }
     }
@@ -223,53 +226,45 @@ public class Server {
         }
     }
 
-    private void sendFile(SocketChannel client, SelectionKey key, String filePathStr) {
+    private void sendFile(SelectionKey key, String filePathStr) {
         try {
             Path filePath = Paths.get(filePathStr);
             if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
                 byte[] responseBody = Files.readAllBytes(filePath);
 
-                String httpResponse = "HTTP/1.1 200 OK\r\n" +
-                        "Content-Type: text/html; charset=UTF-8\r\n" +
-                        "Content-Length: " + responseBody.length + "\r\n" +
-                        "Connection: close\r\n\r\n";
-
-                ByteBuffer buffer = ByteBuffer.allocate(httpResponse.getBytes().length + responseBody.length);
-                buffer.put(httpResponse.getBytes());
-                buffer.put(responseBody);
-                buffer.flip();
-
-                client.write(buffer);
-                closeClient(client, key, "📤 Handled request -> Status: 200 OK");
+                queueResponse(key, new HttpResponseWriter(200, "OK",
+                        "text/html; charset=UTF-8", responseBody));
             } else {
-                sendError(client, key, 404);
+                sendError(key, 404);
             }
         } catch (IOException e) {
-            sendError(client, key, 500);
+            sendError(key, 500);
         }
     }
 
-    private void sendResponse(SocketChannel client, SelectionKey key, int statusCode, String message) {
-        try {
-            String httpResponse = "HTTP/1.1 " + statusCode + " OK\r\n" +
-                    "Content-Type: text/plain; charset=UTF-8\r\n" +
-                    "Content-Length: " + message.getBytes().length + "\r\n" +
-                    "Connection: close\r\n\r\n" +
-                    message;
-
-            client.write(ByteBuffer.wrap(httpResponse.getBytes()));
-            closeClient(client, key, "📤 Sent response: " + statusCode);
-        } catch (Exception e) {
-            System.out.println("⚠️ Error sending response: " + e.getMessage());
-        }
+    private void sendResponse(SelectionKey key, int statusCode, String message) {
+        queueResponse(key, new HttpResponseWriter(statusCode, statusCode == 201 ? "Created" : "OK",
+                "text/plain; charset=UTF-8", message.getBytes(StandardCharsets.UTF_8)));
     }
 
-    private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
-        try {
-            errorHandler.sendError(client, key, statusCode);
-            closeClient(client, key, "❌ Sent error response: " + statusCode);
-        } catch (Exception e) {
-            System.out.println("⚠️ Error sending error response: " + e.getMessage());
+    private void sendError(SelectionKey key, int statusCode) {
+        queueResponse(key, errorHandler.createResponse(statusCode));
+    }
+
+    private void queueResponse(SelectionKey key, HttpResponseWriter response) {
+        // Release the request buffer and resume only when the socket can accept output.
+        key.attach(response);
+        key.interestOps(SelectionKey.OP_WRITE);
+    }
+
+    private void writeData(SelectionKey key) throws IOException {
+        SocketChannel client = (SocketChannel) key.channel();
+        HttpResponseWriter response = (HttpResponseWriter) key.attachment();
+        if (response.writeTo(client) > 0) {
+            clientLastActiveTime.put(client, System.currentTimeMillis());
+        }
+        if (response.isComplete()) {
+            closeClient(client, key, "📤 Response sent completely.");
         }
     }
 }

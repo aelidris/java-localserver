@@ -46,12 +46,22 @@ Invalid or repeated `Content-Length` headers receive 400; declared bodies above
 the configured limit receive 413 without waiting for the body. Requests without
 `Content-Length` have an empty body. Until chunked decoding is implemented,
 `Transfer-Encoding` requests are rejected with 400. Connections close after one
-response; partial response writes still need a separate implementation step.
+complete response. Files, text responses, and error pages retain unsent bytes and
+resume on `OP_WRITE` events, including when a socket temporarily accepts zero
+bytes. Write failures close only the affected connection. Responses are still
+buffered in memory; streaming files from disk remains a future improvement.
 
 Run the request reader regression checks (JDK 11+):
 
 ```bash
 bash test-requests.sh
+```
+
+Run the response writer regression checks, including short/zero writes, binary
+bodies, UTF-8 byte lengths, and custom/fallback error pages:
+
+```bash
+bash test-responses.sh
 ```
 
 ## CGI handler usage
