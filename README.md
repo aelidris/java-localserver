@@ -5,7 +5,7 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 ## 🚀 Key Features
 
 - **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
-- **HTTP/1.1 Protocol Compliance:** Full support for `GET`, `POST`, and `DELETE` methods, chunked/unchunked request management, and robust status code handling.
+- **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` requests. Chunked requests are not yet supported; full HTTP/1.1 compliance remains in progress.
 - **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
 - **Configuration Engine:** JSON-based configuration supporting host/port binding, custom routes, redirection, directory listings, and body size limits.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
@@ -32,6 +32,26 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 ├── config.json           # Server routing & environment config
 ├── error_pages/          # Custom HTML error response files
 └── README.md
+```
+
+## Request receiving
+
+Each connection accumulates its own request across socket reads. Routing and
+upload writes happen only after the headers and declared body have arrived.
+Raw upload bodies stay as bytes, preserving binary files; multipart form parsing
+is not implemented. Headers are limited to 16 KiB, including the request line and
+final blank line. Bodies are buffered in memory up to `client_max_body_size`.
+
+Invalid or repeated `Content-Length` headers receive 400; declared bodies above
+the configured limit receive 413 without waiting for the body. Requests without
+`Content-Length` have an empty body. Until chunked decoding is implemented,
+`Transfer-Encoding` requests are rejected with 400. Connections close after one
+response; partial response writes still need a separate implementation step.
+
+Run the request reader regression checks (JDK 11+):
+
+```bash
+bash test-requests.sh
 ```
 
 ## CGI handler usage

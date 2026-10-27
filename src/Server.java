@@ -90,7 +90,8 @@ public class Server {
         }
         try {
             client.configureBlocking(false);
-            client.register(selector, SelectionKey.OP_READ);
+            client.register(selector, SelectionKey.OP_READ,
+                    new HttpRequestReader(configLoader.getMaxBodySize()));
 
             // Record connection time
             clientLastActiveTime.put(client, System.currentTimeMillis());
@@ -104,9 +105,6 @@ public class Server {
     private void readData(SelectionKey key) throws IOException {
         SocketChannel client = (SocketChannel) key.channel();
 
-        // Refresh last active time on new data
-        clientLastActiveTime.put(client, System.currentTimeMillis());
-
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         int bytesRead = client.read(buffer);
 
@@ -118,32 +116,21 @@ public class Server {
             return;
         }
 
-        String requestData = new String(buffer.array(), 0, bytesRead);
-        System.out.println("📥 Received request:\n" + requestData);
-
-        String[] lines = requestData.split("\r\n");
-        if (lines.length == 0) {
-            sendError(client, key, 400);
-            return;
-        }
-
-        String[] requestLineParts = lines[0].split(" ");
-        if (requestLineParts.length < 2) {
-            sendError(client, key, 400);
-            return;
-        }
-
-        String method = requestLineParts[0];
-        String uri = requestLineParts[1];
-
-        // Check Content-Length for Payload Too Large (413) on POST requests
-        if (method.equals("POST")) {
-            long contentLength = parseContentLength(lines);
-            if (contentLength > configLoader.getMaxBodySize()) {
-                sendError(client, key, 413);
+        clientLastActiveTime.put(client, System.currentTimeMillis());
+        HttpRequestReader request = (HttpRequestReader) key.attachment();
+        buffer.flip();
+        try {
+            if (!request.consume(buffer)) {
                 return;
             }
+        } catch (HttpRequestReader.RequestException e) {
+            sendError(client, key, e.statusCode);
+            return;
         }
+
+        String method = request.getMethod();
+        String uri = request.getUri();
+        System.out.println("📥 Received complete request: " + method + " " + uri);
 
         // Route the request via Router
         Router.RequestResult result = router.route(method, uri);
@@ -155,14 +142,13 @@ public class Server {
                     sendResponse(client, key, 200, "File deleted successfully.");
                 } else if (method.equals("POST")) {
                     try {
-                        String body = extractRequestBody(requestData);
                         Path filePath = Paths.get(result.filePath);
 
                         if (filePath.getParent() != null) {
                             Files.createDirectories(filePath.getParent());
                         }
 
-                        Files.writeString(filePath, body);
+                        Files.write(filePath, request.getBody());
 
                         sendResponse(client, key, 201, "File uploaded successfully.");
                     } catch (IOException e) {
@@ -201,6 +187,11 @@ public class Server {
             long lastActive = entry.getValue();
 
             if (currentTime - lastActive > TIMEOUT_MS) {
+                SelectionKey key = client.keyFor(selector);
+                if (key != null) {
+                    key.attach(null);
+                    key.cancel();
+                }
                 try {
                     System.out.println(
                             "⏰ Connection timeout reached. Closing inactive client: " + client.getRemoteAddress());
@@ -222,6 +213,7 @@ public class Server {
         System.out.println(logMessage);
         clientLastActiveTime.remove(client);
         if (key != null) {
+            key.attach(null);
             key.cancel();
         }
         try {
@@ -229,27 +221,6 @@ public class Server {
         } catch (IOException e) {
             System.out.println("⚠️ Error closing client: " + e.getMessage());
         }
-    }
-
-    private String extractRequestBody(String requestData) {
-        int bodyIndex = requestData.indexOf("\r\n\r\n");
-        if (bodyIndex != -1 && bodyIndex + 4 < requestData.length()) {
-            return requestData.substring(bodyIndex + 4);
-        }
-        return "";
-    }
-
-    private long parseContentLength(String[] lines) {
-        for (String line : lines) {
-            if (line.toLowerCase().startsWith("content-length:")) {
-                try {
-                    return Long.parseLong(line.substring(15).trim());
-                } catch (NumberFormatException e) {
-                    return 0;
-                }
-            }
-        }
-        return 0;
     }
 
     private void sendFile(SocketChannel client, SelectionKey key, String filePathStr) {
