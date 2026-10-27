@@ -1,6 +1,8 @@
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.CharacterCodingException;
@@ -27,6 +29,17 @@ public class ConfigLoader {
         public String root = "./public";
         public String defaultFile = "index.html";
         public boolean directoryListing = false;
+        public RedirectConfig redirect;
+    }
+
+    public static final class RedirectConfig {
+        public final int status;
+        public final String location;
+
+        private RedirectConfig(int status, String location) {
+            this.status = status;
+            this.location = location;
+        }
     }
 
     public static class ConfigException extends IllegalArgumentException {
@@ -134,7 +147,7 @@ public class ConfigLoader {
     private static RouteConfig route(Object value, String name) {
         String field = "routes." + name;
         Map<String, Object> fields = object(value, field);
-        knownKeys(fields, Set.of("accepted_methods", "root", "default_file", "directory_listing"), field);
+        knownKeys(fields, Set.of("accepted_methods", "root", "default_file", "directory_listing", "redirect"), field);
         RouteConfig route = new RouteConfig();
         List<?> methods = array(fields.get("accepted_methods"), field + ".accepted_methods");
         if (methods.isEmpty()) {
@@ -157,7 +170,35 @@ public class ConfigLoader {
             throw invalid(field + ".directory_listing", "must be a boolean");
         }
         route.directoryListing = (Boolean) listing;
+        if (fields.containsKey("redirect")) {
+            route.redirect = redirect(fields.get("redirect"), field + ".redirect");
+        }
         return route;
+    }
+
+    private static RedirectConfig redirect(Object value, String field) {
+        Map<String, Object> fields = object(value, field);
+        knownKeys(fields, Set.of("status", "location"), field);
+        int status = (int) integer(fields.getOrDefault("status", BigDecimal.valueOf(302)), field + ".status", 301, 308);
+        if (!Set.of(301, 302, 303, 307, 308).contains(status)) {
+            throw invalid(field + ".status", "must be 301, 302, 303, 307, or 308");
+        }
+        String location = string(fields.get("location"), field + ".location");
+        if (location.chars().anyMatch(c -> c <= 32 || c == 127) || location.contains("\\")) {
+            throw invalid(field + ".location", "must not contain whitespace, control characters, or backslashes");
+        }
+        try {
+            URI uri = new URI(location);
+            boolean local = location.startsWith("/") && !location.startsWith("//") && uri.getRawAuthority() == null;
+            boolean external = ("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                    && uri.getHost() != null && (uri.getPort() == -1 || (uri.getPort() >= 1 && uri.getPort() <= 65535));
+            if (!local && !external) {
+                throw invalid(field + ".location", "must be a path starting with '/' or an absolute HTTP(S) URL");
+            }
+            return new RedirectConfig(status, uri.toASCIIString());
+        } catch (URISyntaxException e) {
+            throw invalid(field + ".location", "must be a valid URI");
+        }
     }
 
     @SuppressWarnings("unchecked")

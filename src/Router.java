@@ -16,6 +16,7 @@ public class Router {
 
     public enum RouteStatus {
         OK,
+        REDIRECT,
         BAD_REQUEST,
         NOT_FOUND,
         FORBIDDEN,
@@ -28,6 +29,8 @@ public class Router {
         public RouteStatus status;
         public String filePath;
         public boolean isDirectory;
+        public ConfigLoader.RedirectConfig redirect;
+        public String directoryUrlPath;
 
         public RequestResult(RouteStatus status, String filePath, boolean isDirectory) {
             this.status = status;
@@ -38,9 +41,18 @@ public class Router {
 
     public RequestResult route(String method, String uri) {
         int query = uri.indexOf('?');
-        String path = query >= 0 ? uri.substring(0, query) : uri;
-        if (!path.startsWith("/") || path.contains("//") || path.contains("\\") || path.contains("#")
-                || path.chars().anyMatch(c -> c <= 32 || c == 127)) {
+        String rawPath = query >= 0 ? uri.substring(0, query) : uri;
+        if (rawPath.contains("#") || rawPath.chars().anyMatch(c -> c <= 32 || c == 127)) {
+            return failure(RouteStatus.BAD_REQUEST);
+        }
+        String path;
+        try {
+            path = UrlPath.decode(rawPath);
+        } catch (IllegalArgumentException e) {
+            return failure(RouteStatus.BAD_REQUEST);
+        }
+        if (!path.startsWith("/") || path.contains("//") || path.contains("\\")
+                || path.chars().anyMatch(Character::isISOControl)) {
             return failure(RouteStatus.BAD_REQUEST);
         }
         // Reject traversal before matching so it cannot cross into another route.
@@ -63,6 +75,11 @@ public class Router {
         ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routeKey);
         if (!config.acceptedMethods.contains(method)) {
             return failure(RouteStatus.METHOD_NOT_ALLOWED);
+        }
+        if (config.redirect != null) {
+            RequestResult result = new RequestResult(RouteStatus.REDIRECT, null, false);
+            result.redirect = config.redirect;
+            return result;
         }
 
         String relative = path.substring(routeKey.equals("/") ? 1 : routeKey.length());
@@ -111,8 +128,9 @@ public class Router {
                 if (!config.directoryListing) {
                     return failure(RouteStatus.FORBIDDEN);
                 }
-                // Directory response generation is handled separately from route selection.
-                return new RequestResult(RouteStatus.OK, target.toString(), true);
+                RequestResult result = new RequestResult(RouteStatus.OK, target.toString(), true);
+                result.directoryUrlPath = path;
+                return result;
             }
             if (!Files.isRegularFile(target)) {
                 return failure(RouteStatus.FORBIDDEN);

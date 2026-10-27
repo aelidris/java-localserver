@@ -7,7 +7,7 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 - **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
 - **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` and chunked requests. Full HTTP/1.1 compliance remains in progress.
 - **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
-- **Configuration Engine:** Validated JSON configuration for host/ports, body limits, error page paths, and custom routes with per-route roots and methods. Redirections and directory listing responses remain in progress.
+- **Configuration Engine:** Validated JSON configuration for host/ports, body limits, error page paths, and custom routes with per-route roots, methods, redirects, and directory listings.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
 - **Robust Error Handling & Safety:** Default custom HTML error pages for `400`, `403`, `404`, `405`, `413`, and `500` errors, designed to prevent crashes, memory leaks, and file descriptor exhaustion.
 
@@ -61,8 +61,7 @@ nesting to 32 levels. Parsing uses Java Core only.
 With `routes` omitted, `/` serves `./public/index.html` with `GET` allowed.
 For declared routes, an omitted root defaults to `./public` (`./uploads` for the
 existing `/uploads` route), and `default_file` defaults to `index.html`. The
-listing flag defaults to false except for `/uploads`; generating directory
-listings is still pending.
+listing flag defaults to false except for `/uploads`.
 Filesystem paths remain relative to the working directory. Upload directories
 may be absent at startup and are created on upload. Configuration is applied
 only after all fields pass validation.
@@ -78,8 +77,11 @@ bash test-config.sh
 The longest matching prefix wins at a path-segment boundary: `/assets/private`
 takes precedence over `/assets`, while `/assets-old` falls back to `/`. Query
 strings do not affect matching. The matched prefix is stripped before resolving
-the remainder under that route's root. Matching is case-sensitive and uses
-literal URL paths; percent-decoding of request paths is not implemented yet.
+the remainder under that route's root. Matching is case-sensitive. Request paths
+are percent-decoded once as strict UTF-8 before matching; `+` remains a literal
+plus, not a space. Invalid escapes/UTF-8 return 400, and decoded `.`/`..` segments
+return 403. Query strings are separated before decoding, so `%3F` and `%23` can
+refer to filenames containing `?` and `#`.
 
 For example, use this `routes` object to serve static content and allow uploads
 under a separate prefix:
@@ -104,12 +106,70 @@ GET directory requests use `default_file`, including nested directories. An
 existing file can also be a route root, served only at the mount itself (with
 an optional trailing slash). POST and DELETE cannot target directories. Dot
 segments and resolved symlinks leading outside a directory root are rejected.
-Directory listing responses and redirections remain separate implementation steps.
 
 Run the routing regression checks:
 
 ```bash
 bash test-routing.sh
+```
+
+## Directory listings
+
+For GET requests targeting a directory, a regular `default_file` takes priority.
+When no default file is found, `directory_listing: true` produces a 200 HTML
+index; false returns 403. An empty directory also returns a valid HTML page.
+The existing `/uploads` route in `config.json` already enables listings.
+
+The index sorts directories first, then names in case-sensitive order. Names
+and titles are HTML-escaped, and root-relative links percent-encode UTF-8 names,
+including spaces, plus signs, percent signs, and Arabic text. Links work with or
+without a trailing slash on the requested directory and retain custom route
+prefixes. The HTML shows the URL path, not the server's filesystem path.
+
+Only ordinary files and directories are listed. Symlinks, special files, and
+names containing control characters or backslashes are omitted. Directory
+streams close after enumeration. Listings are bounded to 10,000 scanned entries
+and 2 MiB of generated UTF-8 HTML; exceeding either limit returns 500 instead of
+a partial index. Responses use the same non-blocking writer as other pages.
+
+Run the directory listing and generated-link checks:
+
+```bash
+bash test-listing.sh
+```
+
+## Route redirects
+
+Add a `redirect` object to a route, for example this entry inside `routes`:
+
+```json
+{
+  "/old": {
+    "accepted_methods": ["GET"],
+    "redirect": { "status": 301, "location": "/new" }
+  }
+}
+```
+
+Supported statuses are 301, 302, 303, 307, and 308; omitted `status` defaults to
+302. `location` is required and accepts a path starting with a single `/` or an
+absolute HTTP(S) URL with a valid host. URI query strings and fragments are
+allowed. Unicode path characters are encoded for the ASCII `Location` header;
+existing percent escapes are preserved. Invalid URIs, raw whitespace/control
+characters, and unsupported status codes fail configuration validation.
+
+The longest matching route and its allowed methods are checked first. A redirect
+then returns the configured status, `Location`, and `Content-Length: 0` through
+the normal non-blocking writer. It does not read, upload, or delete a file, and
+does not require the route root to exist. A more specific non-redirect route can
+still serve files beneath a redirect prefix. The destination is fixed: neither
+the unmatched path suffix nor the incoming query is appended. For example,
+`/old/child?x=1` also redirects to `/new` with the configuration above.
+
+Run the redirect configuration, routing, and response checks:
+
+```bash
+bash test-redirects.sh
 ```
 
 ## Request receiving

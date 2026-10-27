@@ -157,9 +157,14 @@ public class Server {
                     } catch (IOException e) {
                         sendError(key, 500);
                     }
+                } else if (result.isDirectory) {
+                    sendDirectory(key, result);
                 } else {
                     sendFile(key, result.filePath);
                 }
+                break;
+            case REDIRECT:
+                queueResponse(key, HttpResponseWriter.redirect(result.redirect.status, result.redirect.location));
                 break;
             case BAD_REQUEST:
                 sendError(key, 400);
@@ -240,6 +245,19 @@ public class Server {
             } else {
                 sendError(key, 404);
             }
+        } catch (IOException e) {
+            sendError(key, 500);
+        }
+    }
+
+    private void sendDirectory(SelectionKey key, Router.RequestResult result) {
+        try {
+            byte[] body = DirectoryListing.render(Paths.get(result.filePath), result.directoryUrlPath);
+            queueResponse(key, new HttpResponseWriter(200, "OK", "text/html; charset=UTF-8", body));
+        } catch (java.nio.file.AccessDeniedException e) {
+            sendError(key, 403);
+        } catch (java.nio.file.NoSuchFileException | java.nio.file.NotDirectoryException e) {
+            sendError(key, 404);
         } catch (IOException e) {
             sendError(key, 500);
         }
