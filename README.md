@@ -5,7 +5,7 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 ## 🚀 Key Features
 
 - **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
-- **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` requests. Chunked requests are not yet supported; full HTTP/1.1 compliance remains in progress.
+- **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` and chunked requests. Full HTTP/1.1 compliance remains in progress.
 - **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
 - **Configuration Engine:** JSON-based configuration supporting host/port binding, custom routes, redirection, directory listings, and body size limits.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
@@ -43,15 +43,29 @@ is not implemented. Headers are limited to 16 KiB, including the request line an
 final blank line. Bodies are buffered in memory up to `client_max_body_size`.
 
 Invalid or repeated `Content-Length` headers receive 400; declared bodies above
-the configured limit receive 413 without waiting for the body. Requests without
-`Content-Length` have an empty body. Until chunked decoding is implemented,
-`Transfer-Encoding` requests are rejected with 400. Connections close after one
-complete response. Files, text responses, and error pages retain unsent bytes and
+the configured limit receive 413 without waiting for the body. Requests with
+neither `Content-Length` nor `Transfer-Encoding` have an empty body.
+
+`Transfer-Encoding: chunked` is decoded incrementally, even when chunk sizes,
+binary data, or CRLF separators arrive across separate reads. The body limit
+applies to the sum of decoded bytes; a chunk that would exceed it receives 413
+before its data is read. Completion requires the zero-sized chunk and the final
+empty trailer line, as described in [RFC 9112 section 7.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1).
+Valid chunk extensions and trailers are parsed and discarded. Size/trailer lines
+are limited to 8 KiB excluding CRLF; total extensions and the complete trailer
+section each have a separate 16 KiB limit.
+
+Malformed framing, repeated `Transfer-Encoding`, a request combining
+`Transfer-Encoding` with `Content-Length`, and framing fields in trailers receive
+400. Only a single `chunked` transfer coding is supported: additional codings such
+as `gzip, chunked` receive 501; a coding list not ending in `chunked` receives 400.
+
+Connections close after one complete response. Files, text responses, and error pages retain unsent bytes and
 resume on `OP_WRITE` events, including when a socket temporarily accepts zero
 bytes. Write failures close only the affected connection. Responses are still
 buffered in memory; streaming files from disk remains a future improvement.
 
-Run the request reader regression checks (JDK 11+):
+Run the Content-Length and chunked request regression checks (JDK 11+):
 
 ```bash
 bash test-requests.sh

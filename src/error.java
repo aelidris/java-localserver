@@ -51,6 +51,8 @@ public class error {
                 return "Payload Too Large";
             case 500:
                 return "Internal Server Error";
+            case 501:
+                return "Not Implemented";
             default:
                 return "Internal Error";
         }

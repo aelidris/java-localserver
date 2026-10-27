@@ -24,7 +24,7 @@ public class HttpResponseWriterTest {
 
         error fallback = new error(new ConfigLoader("unused"));
         String[] reasons = {"400 Bad Request", "403 Forbidden", "404 Not Found", "405 Method Not Allowed",
-                "413 Payload Too Large", "500 Internal Server Error"};
+                "413 Payload Too Large", "500 Internal Server Error", "501 Not Implemented"};
         for (String reason : reasons) {
             int status = Integer.parseInt(reason.substring(0, 3));
             verify(fallback.createResponse(status), reason,

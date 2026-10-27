@@ -57,7 +57,7 @@ public class HttpRequestReaderTest {
         reject("Content-Length: 1\r\ncontent-length: 2\r\n", 400);
         reject("Content-Length: 6\r\n", 413);
         reject("Content-Length: 999999999999999999999999\r\n", 413);
-        reject("Transfer-Encoding: chunked\r\n", 400);
+        reject("Transfer-Encoding: chunked, chunked\r\n", 400);
         reject("Content-Length: 1\r\nTransfer-Encoding: chunked\r\n", 400);
         reject("Content-Length : 1\r\n", 400);
         reject("BrokenHeader\r\n", 400);
