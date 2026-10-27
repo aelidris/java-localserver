@@ -30,6 +30,7 @@ public class ConfigLoader {
         public String defaultFile = "index.html";
         public boolean directoryListing = false;
         public RedirectConfig redirect;
+        public Map<String, String> cgi = Map.of();
     }
 
     public static final class RedirectConfig {
@@ -147,7 +148,7 @@ public class ConfigLoader {
     private static RouteConfig route(Object value, String name) {
         String field = "routes." + name;
         Map<String, Object> fields = object(value, field);
-        knownKeys(fields, Set.of("accepted_methods", "root", "default_file", "directory_listing", "redirect"), field);
+        knownKeys(fields, Set.of("accepted_methods", "root", "default_file", "directory_listing", "redirect", "cgi"), field);
         RouteConfig route = new RouteConfig();
         List<?> methods = array(fields.get("accepted_methods"), field + ".accepted_methods");
         if (methods.isEmpty()) {
@@ -172,6 +173,29 @@ public class ConfigLoader {
         route.directoryListing = (Boolean) listing;
         if (fields.containsKey("redirect")) {
             route.redirect = redirect(fields.get("redirect"), field + ".redirect");
+        }
+        if (fields.containsKey("cgi")) {
+            Map<String, Object> mappings = object(fields.get("cgi"), field + ".cgi");
+            if (mappings.isEmpty()) {
+                throw invalid(field + ".cgi", "must contain an extension-to-interpreter mapping");
+            }
+            Map<String, String> interpreters = new HashMap<>();
+            for (Map.Entry<String, Object> mapping : mappings.entrySet()) {
+                String extension = mapping.getKey();
+                if (!extension.matches("\\.[A-Za-z0-9]+")) {
+                    throw invalid(field + ".cgi", "extensions must start with '.' followed by letters or digits");
+                }
+                String interpreter = string(mapping.getValue(), field + ".cgi." + extension);
+                if (interpreter.chars().anyMatch(Character::isISOControl)
+                        || (!interpreter.contains("/") && interpreter.chars().anyMatch(Character::isWhitespace))) {
+                    throw invalid(field + ".cgi." + extension, "must be one executable name or path, without command arguments");
+                }
+                if (interpreter.contains("/")) {
+                    interpreter = Paths.get(interpreter).toAbsolutePath().normalize().toString();
+                }
+                interpreters.put(extension, interpreter);
+            }
+            route.cgi = Map.copyOf(interpreters);
         }
         return route;
     }

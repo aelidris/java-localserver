@@ -1,6 +1,8 @@
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.TreeMap;
 
 /** Accumulates one Content-Length or chunked request across socket reads. */
 public final class HttpRequestReader {
@@ -14,6 +16,7 @@ public final class HttpRequestReader {
     private ChunkedBodyReader chunkedBody;
     private String method;
     private String uri;
+    private final Map<String, String> requestHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
     public static final class RequestException extends Exception {
         public final int statusCode;
@@ -70,6 +73,7 @@ public final class HttpRequestReader {
             int colon = validateFieldLine(lines[i]);
             String name = lines[i].substring(0, colon);
             String value = lines[i].substring(colon + 1).trim();
+            requestHeaders.merge(name, value, (first, next) -> first + (name.equalsIgnoreCase("Cookie") ? "; " : ", ") + next);
             if (name.equalsIgnoreCase("Transfer-Encoding")) {
                 if (transferEncoding != null) {
                     throw new RequestException(400);
@@ -139,6 +143,10 @@ public final class HttpRequestReader {
 
     public String getUri() {
         return uri;
+    }
+
+    public String getHeader(String name) {
+        return requestHeaders.getOrDefault(name, "");
     }
 
     public byte[] getBody() {

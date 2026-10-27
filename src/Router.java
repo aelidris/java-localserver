@@ -17,6 +17,7 @@ public class Router {
     public enum RouteStatus {
         OK,
         REDIRECT,
+        CGI,
         BAD_REQUEST,
         NOT_FOUND,
         FORBIDDEN,
@@ -31,11 +32,28 @@ public class Router {
         public boolean isDirectory;
         public ConfigLoader.RedirectConfig redirect;
         public String directoryUrlPath;
+        public CgiTarget cgi;
 
         public RequestResult(RouteStatus status, String filePath, boolean isDirectory) {
             this.status = status;
             this.filePath = filePath;
             this.isDirectory = isDirectory;
+        }
+    }
+
+    public static final class CgiTarget {
+        public final Path script;
+        public final String interpreter;
+        public final String scriptName;
+        public final String pathInfo;
+        public final String pathTranslated;
+
+        private CgiTarget(Path script, String interpreter, String scriptName, String pathInfo, String pathTranslated) {
+            this.script = script;
+            this.interpreter = interpreter;
+            this.scriptName = scriptName;
+            this.pathInfo = pathInfo;
+            this.pathTranslated = pathTranslated;
         }
     }
 
@@ -62,13 +80,7 @@ public class Router {
             }
         }
 
-        String routeKey = null;
-        for (String candidate : configLoader.getRoutePaths()) {
-            boolean matches = candidate.equals("/") || path.equals(candidate) || path.startsWith(candidate + "/");
-            if (matches && (routeKey == null || candidate.length() > routeKey.length())) {
-                routeKey = candidate;
-            }
-        }
+        String routeKey = matchRoute(path);
         if (routeKey == null) {
             return failure(RouteStatus.NOT_FOUND);
         }
@@ -88,6 +100,15 @@ public class Router {
         }
         try {
             Path root = Paths.get(config.root).toAbsolutePath().normalize();
+            if (!config.cgi.isEmpty()) {
+                RequestResult cgi = findCgi(config, root, relative, routeKey, path);
+                if (cgi != null) {
+                    return cgi;
+                }
+                if (!method.equals("GET")) {
+                    return failure(RouteStatus.METHOD_NOT_ALLOWED);
+                }
+            }
             Path target;
             if (Files.isRegularFile(root)) {
                 // A file root serves only the mount itself, not descendants.
@@ -105,6 +126,9 @@ public class Router {
                 }
             }
 
+            if ((method.equals("POST") || method.equals("DELETE")) && isCgiRoot(target)) {
+                return failure(RouteStatus.FORBIDDEN);
+            }
             if (method.equals("POST")) {
                 if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(target)) {
                     return failure(RouteStatus.FORBIDDEN);
@@ -145,6 +169,88 @@ public class Router {
         } catch (IOException e) {
             return failure(RouteStatus.INTERNAL_SERVER_ERROR);
         }
+    }
+
+    private String matchRoute(String path) {
+        String best = null;
+        for (String candidate : configLoader.getRoutePaths()) {
+            if ((candidate.equals("/") || path.equals(candidate) || path.startsWith(candidate + "/"))
+                    && (best == null || candidate.length() > best.length())) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private RequestResult findCgi(ConfigLoader.RouteConfig config, Path root, String relative,
+            String routeKey, String path) throws IOException {
+        if (Files.isRegularFile(root)) {
+            String info = routeKey.equals("/") ? (path.equals("/") ? "" : path) : path.substring(routeKey.length());
+            return cgiResult(config, root, root, routeKey, info);
+        }
+        Path candidate = root;
+        String scriptName = routeKey.equals("/") ? "" : routeKey;
+        for (String segment : relative.split("/")) {
+            if (segment.isEmpty()) {
+                continue;
+            }
+            candidate = candidate.resolve(segment);
+            scriptName += "/" + segment;
+            if (Files.isRegularFile(candidate)) {
+                return cgiResult(config, root, candidate, scriptName, path.substring(scriptName.length()));
+            }
+        }
+        if (Files.isDirectory(candidate)) {
+            Path index = candidate.resolve(config.defaultFile).normalize();
+            if (Files.isRegularFile(index)) {
+                return cgiResult(config, root, index, (path.endsWith("/") ? path : path + "/") + config.defaultFile, "");
+            }
+        }
+        return null;
+    }
+
+    private RequestResult cgiResult(ConfigLoader.RouteConfig config, Path root, Path script,
+            String scriptName, String pathInfo) throws IOException {
+        String name = script.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        String interpreter = dot >= 0 ? config.cgi.get(name.substring(dot)) : null;
+        if (interpreter == null) {
+            return null;
+        }
+        Path realScript = script.toRealPath();
+        if (!realScript.startsWith(canonicalPath(root)) || !Files.isReadable(realScript)) {
+            return failure(RouteStatus.FORBIDDEN);
+        }
+        String translated = "";
+        if (!pathInfo.isEmpty()) {
+            String routeKey = matchRoute(pathInfo);
+            if (routeKey != null) {
+                Path translationRoot = Paths.get(configLoader.getRouteConfig(routeKey).root).toAbsolutePath().normalize();
+                String suffix = pathInfo.substring(routeKey.equals("/") ? 1 : routeKey.length());
+                if (suffix.startsWith("/")) {
+                    suffix = suffix.substring(1);
+                }
+                Path target = translationRoot.resolve(suffix).normalize();
+                if (!canonicalPath(target).startsWith(canonicalPath(translationRoot))) {
+                    return failure(RouteStatus.FORBIDDEN);
+                }
+                translated = target.toString();
+            }
+        }
+        RequestResult result = new RequestResult(RouteStatus.CGI, null, false);
+        result.cgi = new CgiTarget(realScript, interpreter, UrlPath.encode(scriptName), pathInfo, translated);
+        return result;
+    }
+
+    private boolean isCgiRoot(Path target) throws IOException {
+        Path resolved = canonicalPath(target);
+        for (String routePath : configLoader.getRoutePaths()) {
+            ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routePath);
+            if (!config.cgi.isEmpty() && resolved.startsWith(canonicalPath(Paths.get(config.root).toAbsolutePath().normalize()))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Resolves existing symlinks, including parents of a not-yet-created upload. */
