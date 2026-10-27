@@ -9,8 +9,12 @@ public class Main {
             Server server = new Server(config);
             server.start();
 
+        } catch (ConfigLoader.ConfigException e) {
+            System.err.println("Configuration error: " + e.getMessage());
+            System.exit(1);
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("Server failed: " + e.getMessage());
+            System.exit(1);
         }
     }
 }

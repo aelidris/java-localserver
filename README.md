@@ -7,7 +7,7 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 - **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
 - **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` and chunked requests. Full HTTP/1.1 compliance remains in progress.
 - **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
-- **Configuration Engine:** JSON-based configuration supporting host/port binding, custom routes, redirection, directory listings, and body size limits.
+- **Configuration Engine:** Validated JSON configuration for host/ports, body limits, error page paths, and the currently supported `/` and `/uploads` routes. Arbitrary routes, redirections, and directory listing responses remain in progress.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
 - **Robust Error Handling & Safety:** Default custom HTML error pages for `400`, `403`, `404`, `405`, `413`, and `500` errors, designed to prevent crashes, memory leaks, and file descriptor exhaustion.
 
@@ -32,6 +32,41 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 ├── config.json           # Server routing & environment config
 ├── error_pages/          # Custom HTML error response files
 └── README.md
+```
+
+## Configuration validation
+
+Startup reads `config.json` from the working directory and validates it before
+opening any listening sockets. Missing/unreadable files, invalid UTF-8 or JSON,
+duplicate keys, unknown settings, and invalid field values stop startup with a
+field-specific message and exit status 1. Files are limited to 1 MiB and JSON
+nesting to 32 levels. Parsing uses Java Core only.
+
+- `host`: a non-empty, resolvable IP address or hostname; defaults to `127.0.0.1`.
+- `ports`: a non-empty list of distinct integers from 1 to 65535; defaults to `[8080]`.
+- `client_max_body_size`: an integer from 0 to 2147483639; defaults to 1048576.
+  The upper bound reflects the current in-memory body representation, not a
+  guarantee that a given JVM has enough memory for that size.
+- `error_pages`: an object mapping codes 400–599 to non-empty filesystem paths.
+  Missing or unreadable error page files still use the built-in HTML fallback.
+- `routes`: currently accepts `/` and `/uploads`, and must include `/` when supplied.
+  Each route requires a non-empty `accepted_methods` list containing distinct
+  `GET`, `POST`, or `DELETE` values. `root`, `default_file`, and the boolean
+  `directory_listing` are read from the file. Default files must stay relative
+  to the route root. Other route names/options are rejected until implemented.
+
+With `routes` omitted, `/` serves `./public/index.html` with `GET` allowed.
+For declared routes, omitted roots default to `./public` or `./uploads`, and
+`default_file` defaults to `index.html`. The listing flag defaults to false for
+`/` and true for `/uploads`; generating directory listings is still pending.
+Filesystem paths remain relative to the working directory. Upload directories
+may be absent at startup and are created on upload. Configuration is applied
+only after all fields pass validation.
+
+Run the configuration and startup-failure checks:
+
+```bash
+bash test-config.sh
 ```
 
 ## Request receiving
