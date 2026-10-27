@@ -64,10 +64,19 @@ public class Server {
                 if (!key.isValid())
                     continue;
 
-                if (key.isAcceptable()) {
-                    acceptConnection(key);
-                } else if (key.isReadable()) {
-                    readData(key);
+                try {
+                    if (key.isAcceptable()) {
+                        acceptConnection(key);
+                    } else if (key.isReadable()) {
+                        readData(key);
+                    }
+                } catch (IOException | RuntimeException e) {
+                    if (key.channel() instanceof SocketChannel) {
+                        closeClient((SocketChannel) key.channel(), key,
+                                "⚠️ Client request failed: " + e.getClass().getSimpleName());
+                    } else {
+                        System.err.println("⚠️ Could not accept connection: " + e.getMessage());
+                    }
                 }
             }
         }
@@ -76,12 +85,20 @@ public class Server {
     private void acceptConnection(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
         SocketChannel client = server.accept();
-        client.configureBlocking(false);
-        client.register(selector, SelectionKey.OP_READ);
+        if (client == null) {
+            return;
+        }
+        try {
+            client.configureBlocking(false);
+            client.register(selector, SelectionKey.OP_READ);
 
-        // Record connection time
-        clientLastActiveTime.put(client, System.currentTimeMillis());
-        System.out.println("🔗 Accepted new connection from: " + client.getRemoteAddress());
+            // Record connection time
+            clientLastActiveTime.put(client, System.currentTimeMillis());
+            System.out.println("🔗 Accepted new connection from: " + client.getRemoteAddress());
+        } catch (IOException | RuntimeException e) {
+            closeClient(client, client.keyFor(selector), "⚠️ Client setup failed.");
+            throw e;
+        }
     }
 
     private void readData(SelectionKey key) throws IOException {
@@ -95,6 +112,9 @@ public class Server {
 
         if (bytesRead == -1) {
             closeClient(client, key, "🔌 Client disconnected.");
+            return;
+        }
+        if (bytesRead == 0) {
             return;
         }
 
@@ -199,13 +219,13 @@ public class Server {
     }
 
     private void closeClient(SocketChannel client, SelectionKey key, String logMessage) {
+        System.out.println(logMessage);
+        clientLastActiveTime.remove(client);
+        if (key != null) {
+            key.cancel();
+        }
         try {
-            System.out.println(logMessage);
-            clientLastActiveTime.remove(client);
             client.close();
-            if (key != null) {
-                key.cancel();
-            }
         } catch (IOException e) {
             System.out.println("⚠️ Error closing client: " + e.getMessage());
         }
