@@ -118,12 +118,12 @@ To verify that the server correctly enforces maximum body size limitations (conf
 
 **Generate a test file (> 1MB)**:
 
-   ```bash
+  ```bash
    dd if=/dev/zero of=uploads/bigfile.txt bs=1M count=2
-   ```
+  ```
 
-   ``` 
+  ```bash 
    curl -X POST http://localhost:8080/uploads/bigfile.txt \
      --data-binary "@uploads/bigfile.txt" \
-     -H "Content-Type: application/octet-stream"
-     ```
+     -H "Content-Type: application/octet-stream"    
+  ```
