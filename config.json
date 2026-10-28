@@ -24,13 +24,6 @@
             "default_file": "index.html",
             "directory_listing": false
         },
-        "/cgi": {
-            "accepted_methods": ["GET", "POST"],
-            "root": "./cgi",
-            "default_file": "hello.py",
-            "directory_listing": false,
-            "cgi": {".py": "python3"}
-        },
         "/uploads": {
             "accepted_methods": [
                 "GET",

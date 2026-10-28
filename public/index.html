@@ -25,7 +25,7 @@
             box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
             text-align: center;
             border: 1px solid #334155;
-            max-width: 600px;
+            max-width: 650px;
             width: 100%;
         }
 
@@ -34,17 +34,25 @@
             margin-bottom: 0.5rem;
         }
 
+        h2 {
+            color: #f1f5f9;
+            font-size: 1.1rem;
+            margin-top: 1.5rem;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 0.5rem;
+        }
+
         p {
             color: #94a3b8;
-            font-size: 1rem;
-            margin-bottom: 1.5rem;
+            font-size: 0.95rem;
+            margin-bottom: 1rem;
         }
 
         .grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
             gap: 10px;
-            margin-top: 1.5rem;
+            margin-top: 1rem;
         }
 
         .btn {
@@ -72,65 +80,68 @@
             border-color: #38bdf8;
             grid-column: 1 / -1;
         }
+
+        .btn-cgi {
+            background-color: #8b5cf6;
+            border-color: #a78bfa;
+        }
+
+        .btn-cgi:hover {
+            background-color: #7c3aed;
+        }
+
+        .result-box {
+            background-color: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: #38bdf8;
+            word-break: break-all;
+            text-align: left;
+            max-height: 120px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 
 <body>
     <div class="card">
         <h1>🚀 Java NIO Server Dashboard</h1>
-        <p>Test all server responses and error pages instantly below:</p>
+        <p>Test all HTTP status codes, CGI scripts, and Session/Cookies below:</p>
 
+        <h2>📌 Status Responses</h2>
         <div class="grid">
-            <!-- 200 OK -->
             <a href="/" class="btn btn-success">200 OK (Home)</a>
-
-            <!-- 403 Forbidden (Directory) -->
             <a href="/images" class="btn" target="_blank">403 Forbidden</a>
-
-            <!-- 404 Not Found -->
             <a href="/random-page-test" class="btn" target="_blank">404 Not Found</a>
-
-            <!-- 405 Method Not Allowed -->
             <button class="btn" onclick="test405()">405 Method Not Allowed</button>
-
-            <!-- 413 Payload Too Large -->
             <button class="btn" onclick="testPayload()">413 Payload Too Large</button>
-
-            <!-- 500 Internal Server Error -->
             <button class="btn" onclick="test500()">500 Server Error</button>
         </div>
 
-        <!-- Test Upload & Delete Workflow -->
-        <div style="margin: 15px 0;">
-            <button class="btn" onclick="testUploadAndDelete()" style="background-color: #28a745; color: white;">
+        <h2>🐍 CGI & Session/Cookie Testing</h2>
+        <div class="grid">
+            <button class="btn btn-cgi" onclick="testCGI('GET')">Test CGI (GET)</button>
+            <button class="btn btn-cgi" onclick="testCGI('POST')">Test CGI (POST)</button>
+            <button class="btn" onclick="checkCookies()">Check Cookies</button>
+        </div>
+        <div id="cgi-result" class="result-box" style="display: none;"></div>
+
+        <h2>📂 Upload & Delete Workflow</h2>
+        <div style="margin-top: 10px;">
+            <button class="btn" onclick="testUploadAndDelete()" style="background-color: #10b981; border-color: #34d399;">
                 🧪 Test Upload (POST) & Delete Flow
             </button>
-            <p id="delete-test-result" style="margin-top: 5px; font-weight: bold;"></p>
+            <p id="delete-test-result" style="margin-top: 8px; font-weight: bold;"></p>
         </div>
     </div>
 
     <script>
-        function testPost() {
-            fetch('/', { method: 'POST' })
-                .then(res => res.text().then(html => {
-                    document.open();
-                    document.write(html);
-                    document.close();
-                }));
-        }
-
-        function testPayload() {
-            alert('To test 413, use curl or send a huge POST body via script/Postman as configured in config.json.');
-        }
-
-        function test500() {
-            alert('To test 500 Internal Server Error, trigger an unhandled exception in your Java server code (e.g. throwing a RuntimeException inside a request handler) or handle a server-side crash scenario.');
-        }
-
         function test405() {
-            fetch('/', {
-                method: 'PUT'
-            })
+            fetch('/', { method: 'PUT' })
                 .then(response => response.text())
                 .then(html => {
                     let win = window.open();
@@ -140,47 +151,74 @@
                 .catch(err => console.error(err));
         }
 
+        function testPayload() {
+            alert('To test 413, use curl or send a large body via script as configured in config.json.');
+        }
+
+        function test500() {
+            alert('To test 500 Internal Server Error, trigger an exception on the server.');
+        }
+
+        async function testCGI(method) {
+            const box = document.getElementById('cgi-result');
+            box.style.display = 'block';
+            box.innerText = `⏳ Executing Python CGI via ${method}...`;
+
+            try {
+                let options = { method: method };
+                let url = '/test.py';
+                if (method === 'POST') {
+                    options.body = 'message=HelloFromDashboard';
+                }
+
+                let response = await fetch(url, options);
+                let text = await response.text();
+                box.innerText = `Response:\n` + text;
+            } catch (err) {
+                box.innerText = `❌ CGI Error: ` + err.message;
+            }
+        }
+
+        function checkCookies() {
+            const box = document.getElementById('cgi-result');
+            box.style.display = 'block';
+            box.innerText = `🍪 Current Browser Cookies:\n` + (document.cookie || "No cookies set yet.");
+        }
+
         async function testUploadAndDelete() {
             const resultElement = document.getElementById('delete-test-result');
-            resultElement.innerText = "⏳ Step 1: Uploading/Creating test file via POST...";
+            resultElement.innerText = "⏳ Step 1: Uploading file via POST...";
             resultElement.style.color = "orange";
 
             try {
-                // POST request
                 let postResponse = await fetch('/uploads/test-file.txt', {
                     method: 'POST',
                     body: 'Hello, this is a test file for deletion audit.'
                 });
 
                 if (postResponse.ok || postResponse.status === 200 || postResponse.status === 201) {
-                    resultElement.innerText = "✅ Step 1 Success: File created. Now deleting via DELETE...";
-                    resultElement.style.color = "blue";
+                    resultElement.innerText = "✅ Step 1 Success! Now deleting via DELETE...";
+                    resultElement.style.color = "#38bdf8";
 
                     await new Promise(resolve => setTimeout(resolve, 1000));
 
-                    // DELETE request
-                    let deleteResponse = await fetch('/uploads/test-file.txt', {
-                        method: 'DELETE'
-                    });
+                    let deleteResponse = await fetch('/uploads/test-file.txt', { method: 'DELETE' });
 
                     if (deleteResponse.ok) {
                         let msg = await deleteResponse.text();
-                        resultElement.innerText = "🎉 Success! File uploaded and then deleted successfully. (" + msg + ")";
-                        resultElement.style.color = "green";
+                        resultElement.innerText = "🎉 Success! Uploaded and Deleted: (" + msg + ")";
+                        resultElement.style.color = "#34d399";
                     } else {
                         resultElement.innerText = "❌ Delete failed with status: " + deleteResponse.status;
-                        resultElement.style.color = "red";
+                        resultElement.style.color = "#f87171";
                     }
-
                 } else {
                     resultElement.innerText = "❌ POST/Upload failed with status: " + postResponse.status;
-                    resultElement.style.color = "red";
+                    resultElement.style.color = "#f87171";
                 }
-
             } catch (error) {
-                console.error(error);
-                resultElement.innerText = "⚠️ Error during test execution: " + error.message;
-                resultElement.style.color = "red";
+                resultElement.innerText = "⚠️ Error: " + error.message;
+                resultElement.style.color = "#f87171";
             }
         }
     </script>

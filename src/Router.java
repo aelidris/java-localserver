@@ -1,9 +1,4 @@
-import java.io.IOException;
-import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
-import java.nio.file.LinkOption;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -16,9 +11,7 @@ public class Router {
 
     public enum RouteStatus {
         OK,
-        REDIRECT,
         CGI,
-        BAD_REQUEST,
         NOT_FOUND,
         FORBIDDEN,
         METHOD_NOT_ALLOWED,
@@ -30,9 +23,6 @@ public class Router {
         public RouteStatus status;
         public String filePath;
         public boolean isDirectory;
-        public ConfigLoader.RedirectConfig redirect;
-        public String directoryUrlPath;
-        public CgiTarget cgi;
 
         public RequestResult(RouteStatus status, String filePath, boolean isDirectory) {
             this.status = status;
@@ -41,243 +31,93 @@ public class Router {
         }
     }
 
-    public static final class CgiTarget {
-        public final Path script;
-        public final String interpreter;
-        public final String scriptName;
-        public final String pathInfo;
-        public final String pathTranslated;
-
-        private CgiTarget(Path script, String interpreter, String scriptName, String pathInfo, String pathTranslated) {
-            this.script = script;
-            this.interpreter = interpreter;
-            this.scriptName = scriptName;
-            this.pathInfo = pathInfo;
-            this.pathTranslated = pathTranslated;
-        }
-    }
-
     public RequestResult route(String method, String uri) {
-        int query = uri.indexOf('?');
-        String rawPath = query >= 0 ? uri.substring(0, query) : uri;
-        if (rawPath.contains("#") || rawPath.chars().anyMatch(c -> c <= 32 || c == 127)) {
-            return failure(RouteStatus.BAD_REQUEST);
-        }
-        String path;
-        try {
-            path = UrlPath.decode(rawPath);
-        } catch (IllegalArgumentException e) {
-            return failure(RouteStatus.BAD_REQUEST);
-        }
-        if (!path.startsWith("/") || path.contains("//") || path.contains("\\")
-                || path.chars().anyMatch(Character::isISOControl)) {
-            return failure(RouteStatus.BAD_REQUEST);
-        }
-        // Reject traversal before matching so it cannot cross into another route.
-        for (String segment : path.split("/")) {
-            if (segment.equals(".") || segment.equals("..")) {
-                return failure(RouteStatus.FORBIDDEN);
-            }
+        // Normalize path (e.g., "/" -> index.html)
+        String pathWithoutQuery = uri.split("\\?")[0];
+
+        // Check route config
+        String routeKey = pathWithoutQuery.startsWith("/uploads") ? "/uploads" : "/";
+        ConfigLoader.RouteConfig routeConfig = configLoader.getRouteConfig(routeKey);
+
+        if (routeConfig == null) {
+            // Fallback default rules if route not explicitly defined
+            routeConfig = new ConfigLoader.RouteConfig();
         }
 
-        String routeKey = matchRoute(path);
-        if (routeKey == null) {
-            return failure(RouteStatus.NOT_FOUND);
-        }
-        ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routeKey);
-        if (!config.acceptedMethods.contains(method)) {
-            return failure(RouteStatus.METHOD_NOT_ALLOWED);
-        }
-        if (config.redirect != null) {
-            RequestResult result = new RequestResult(RouteStatus.REDIRECT, null, false);
-            result.redirect = config.redirect;
-            return result;
+        // Check if HTTP Method is allowed -> 405 Method Not Allowed
+        if (!routeConfig.acceptedMethods.contains(method) && !pathWithoutQuery.endsWith(".py")) {
+            return new RequestResult(RouteStatus.METHOD_NOT_ALLOWED, null, false);
         }
 
-        String relative = path.substring(routeKey.equals("/") ? 1 : routeKey.length());
-        if (relative.startsWith("/")) {
-            relative = relative.substring(1);
+        // Security Protection: Prevent POST/DELETE directly on root index.html to avoid overwriting content (Allowed for CGI .py files)
+        if (method.equals("POST") && !pathWithoutQuery.startsWith("/uploads") && !pathWithoutQuery.endsWith(".py")) {
+            return new RequestResult(RouteStatus.METHOD_NOT_ALLOWED, null, false);
         }
-        try {
-            Path root = Paths.get(config.root).toAbsolutePath().normalize();
-            if (!config.cgi.isEmpty()) {
-                RequestResult cgi = findCgi(config, root, relative, routeKey, path);
-                if (cgi != null) {
-                    return cgi;
-                }
-                if (!method.equals("GET")) {
-                    return failure(RouteStatus.METHOD_NOT_ALLOWED);
-                }
-            }
-            Path target;
-            if (Files.isRegularFile(root)) {
-                // A file root serves only the mount itself, not descendants.
-                if (!relative.isEmpty()) {
-                    return failure(RouteStatus.NOT_FOUND);
-                }
-                target = root;
+
+        // Resolve file path based on root and URI
+        String relativePath = pathWithoutQuery.startsWith("/uploads")
+                ? pathWithoutQuery.substring(8)
+                : (pathWithoutQuery.equals("/") ? "/" + routeConfig.defaultFile : pathWithoutQuery);
+
+        if (relativePath.isEmpty() || relativePath.equals("/")) {
+            relativePath = "/" + (routeConfig.defaultFile != null ? routeConfig.defaultFile : "");
+        }
+
+        String targetPath = routeConfig.root + relativePath;
+        Path fullPath = Paths.get(targetPath).normalize();
+
+        // Security check: ensure path stays inside root directory (prevent path
+        // traversal)
+        Path rootPath = Paths.get(routeConfig.root).normalize();
+        if (!fullPath.startsWith(rootPath)) {
+            return new RequestResult(RouteStatus.FORBIDDEN, null, false);
+        }
+
+        // Check script CGI (end with .py)
+        if (pathWithoutQuery.endsWith(".py")) {
+            if (Files.exists(fullPath) && Files.isRegularFile(fullPath)) {
+                return new RequestResult(RouteStatus.CGI, fullPath.toString(), false);
             } else {
-                target = root.resolve(relative).normalize();
-                if (!target.startsWith(root) || !canonicalPath(target).startsWith(canonicalPath(root))) {
-                    return failure(RouteStatus.FORBIDDEN);
-                }
-                if (relative.isEmpty() && !method.equals("GET")) {
-                    return failure(RouteStatus.FORBIDDEN);
-                }
+                return new RequestResult(RouteStatus.NOT_FOUND, null, false);
             }
-
-            if (config.cgi.isEmpty() && isCgiRoot(target)) {
-                return failure(RouteStatus.FORBIDDEN);
-            }
+        }
+        // Check if file/directory exists
+        if (!Files.exists(fullPath)) {
             if (method.equals("POST")) {
-                if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(target)) {
-                    return failure(RouteStatus.FORBIDDEN);
-                }
-                return new RequestResult(RouteStatus.OK, target.toString(), false);
+                return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
             }
-            if (!Files.exists(target)) {
-                return failure(RouteStatus.NOT_FOUND);
-            }
-            if (method.equals("DELETE")) {
-                return deleteFile(target);
-            }
-            if (Files.isDirectory(target)) {
-                Path index = target.resolve(config.defaultFile).normalize();
-                if (!index.startsWith(root) || !canonicalPath(index).startsWith(canonicalPath(root))) {
-                    return failure(RouteStatus.FORBIDDEN);
-                }
-                if (Files.isRegularFile(index)) {
-                    if (config.cgi.isEmpty() && isCgiRoot(index)) {
-                        return failure(RouteStatus.FORBIDDEN);
-                    }
-                    return new RequestResult(RouteStatus.OK, index.toString(), false);
-                }
-                if (!config.directoryListing) {
-                    return failure(RouteStatus.FORBIDDEN);
-                }
-                RequestResult result = new RequestResult(RouteStatus.OK, target.toString(), true);
-                result.directoryUrlPath = path;
-                return result;
-            }
-            if (!Files.isRegularFile(target)) {
-                return failure(RouteStatus.FORBIDDEN);
-            }
-            return new RequestResult(RouteStatus.OK, target.toString(), false);
-        } catch (InvalidPathException e) {
-            return failure(RouteStatus.BAD_REQUEST);
-        } catch (NoSuchFileException e) {
-            return failure(RouteStatus.NOT_FOUND);
-        } catch (AccessDeniedException e) {
-            return failure(RouteStatus.FORBIDDEN);
-        } catch (IOException e) {
-            return failure(RouteStatus.INTERNAL_SERVER_ERROR);
+            return new RequestResult(RouteStatus.NOT_FOUND, null, false);
         }
+
+        // Check for Directory -> 403 Forbidden (if directory listing is false)
+        if (Files.isDirectory(fullPath)) {
+            if (!routeConfig.directoryListing) {
+                return new RequestResult(RouteStatus.FORBIDDEN, fullPath.toString(), true);
+            }
+        }
+
+        // Handle specific methods logic (GET, POST, DELETE)
+        if (method.equals("POST")) {
+            return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
+        } else if (method.equals("DELETE")) {
+            return handleDeleteMapping(fullPath);
+        }
+
+        // Default GET OK
+        return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
     }
 
-    private String matchRoute(String path) {
-        String best = null;
-        for (String candidate : configLoader.getRoutePaths()) {
-            if ((candidate.equals("/") || path.equals(candidate) || path.startsWith(candidate + "/"))
-                    && (best == null || candidate.length() > best.length())) {
-                best = candidate;
+    private RequestResult handleDeleteMapping(Path path) {
+        try {
+            // Ensure we don't delete the root folder itself
+            if (Files.isRegularFile(path)) {
+                Files.delete(path);
+                return new RequestResult(RouteStatus.OK, path.toString(), false);
+            } else {
+                return new RequestResult(RouteStatus.FORBIDDEN, null, false);
             }
+        } catch (Exception e) {
+            return new RequestResult(RouteStatus.INTERNAL_SERVER_ERROR, null, false);
         }
-        return best;
-    }
-
-    private RequestResult findCgi(ConfigLoader.RouteConfig config, Path root, String relative,
-            String routeKey, String path) throws IOException {
-        if (Files.isRegularFile(root)) {
-            String info = routeKey.equals("/") ? (path.equals("/") ? "" : path) : path.substring(routeKey.length());
-            return cgiResult(config, root, root, routeKey, info);
-        }
-        Path candidate = root;
-        String scriptName = routeKey.equals("/") ? "" : routeKey;
-        for (String segment : relative.split("/")) {
-            if (segment.isEmpty()) {
-                continue;
-            }
-            candidate = candidate.resolve(segment);
-            scriptName += "/" + segment;
-            if (Files.isRegularFile(candidate)) {
-                return cgiResult(config, root, candidate, scriptName, path.substring(scriptName.length()));
-            }
-        }
-        if (Files.isDirectory(candidate)) {
-            Path index = candidate.resolve(config.defaultFile).normalize();
-            if (Files.isRegularFile(index)) {
-                String indexName = candidate.relativize(index).toString().replace(java.io.File.separatorChar, '/');
-                return cgiResult(config, root, index, (path.endsWith("/") ? path : path + "/") + indexName, "");
-            }
-        }
-        return null;
-    }
-
-    private RequestResult cgiResult(ConfigLoader.RouteConfig config, Path root, Path script,
-            String scriptName, String pathInfo) throws IOException {
-        String name = script.getFileName().toString();
-        int dot = name.lastIndexOf('.');
-        String interpreter = dot >= 0 ? config.cgi.get(name.substring(dot)) : null;
-        if (interpreter == null) {
-            return null;
-        }
-        Path realScript = script.toRealPath();
-        if (!realScript.startsWith(canonicalPath(root)) || !Files.isReadable(realScript)) {
-            return failure(RouteStatus.FORBIDDEN);
-        }
-        String translated = "";
-        if (!pathInfo.isEmpty()) {
-            String routeKey = matchRoute(pathInfo);
-            if (routeKey != null) {
-                Path translationRoot = Paths.get(configLoader.getRouteConfig(routeKey).root).toAbsolutePath().normalize();
-                String suffix = pathInfo.substring(routeKey.equals("/") ? 1 : routeKey.length());
-                if (suffix.startsWith("/")) {
-                    suffix = suffix.substring(1);
-                }
-                Path target = translationRoot.resolve(suffix).normalize();
-                if (!canonicalPath(target).startsWith(canonicalPath(translationRoot))) {
-                    return failure(RouteStatus.FORBIDDEN);
-                }
-                translated = target.toString();
-            }
-        }
-        RequestResult result = new RequestResult(RouteStatus.CGI, null, false);
-        result.cgi = new CgiTarget(realScript, interpreter, UrlPath.encode(scriptName), pathInfo, translated);
-        return result;
-    }
-
-    private boolean isCgiRoot(Path target) throws IOException {
-        Path resolved = canonicalPath(target);
-        for (String routePath : configLoader.getRoutePaths()) {
-            ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routePath);
-            if (!config.cgi.isEmpty() && resolved.startsWith(canonicalPath(Paths.get(config.root).toAbsolutePath().normalize()))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Resolves existing symlinks, including parents of a not-yet-created upload. */
-    private static Path canonicalPath(Path path) throws IOException {
-        Path existing = path;
-        while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
-            existing = existing.getParent();
-            if (existing == null) {
-                throw new NoSuchFileException(path.toString());
-            }
-        }
-        return existing.toRealPath().resolve(existing.relativize(path)).normalize();
-    }
-
-    private RequestResult deleteFile(Path path) throws IOException {
-        if (!Files.isRegularFile(path)) {
-            return failure(RouteStatus.FORBIDDEN);
-        }
-        Files.delete(path);
-        return new RequestResult(RouteStatus.OK, path.toString(), false);
-    }
-
-    private static RequestResult failure(RouteStatus status) {
-        return new RequestResult(status, null, false);
     }
 }

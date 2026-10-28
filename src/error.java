@@ -1,4 +1,7 @@
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,27 +17,48 @@ public class error {
         this.configLoader = configLoader;
     }
 
-    public HttpResponseWriter createResponse(int statusCode) {
+    public void sendError(SocketChannel client, SelectionKey key, int statusCode) {
         String statusMessage = getStatusMessage(statusCode);
         String errorPagePath = configLoader.getErrorPagePath(statusCode);
+
+        boolean fileSent = false;
 
         if (errorPagePath != null) {
             try {
                 Path filePath = Paths.get(errorPagePath);
                 if (Files.exists(filePath) && Files.isRegularFile(filePath)) {
                     byte[] fileBytes = Files.readAllBytes(filePath);
-                    return new HttpResponseWriter(statusCode, statusMessage,
-                            "text/html; charset=UTF-8", fileBytes);
+                    String headers = "HTTP/1.1 " + statusCode + " " + statusMessage + "\r\n" +
+                            "Content-Type: text/html; charset=UTF-8\r\n" +
+                            "Content-Length: " + fileBytes.length + "\r\n\r\n";
+
+                    ByteBuffer buffer = ByteBuffer
+                            .allocate(headers.getBytes(StandardCharsets.UTF_8).length + fileBytes.length);
+                    buffer.put(headers.getBytes(StandardCharsets.UTF_8));
+                    buffer.put(fileBytes);
+                    buffer.flip();
+
+                    client.write(buffer);
+                    fileSent = true;
                 }
             } catch (IOException e) {
                 System.out.println("⚠️ Could not read error page file: " + e.getMessage());
             }
         }
 
-        // Fallback default HTML response if the error page file is missing or unreadable.
-        String htmlContent = "<html><body><h1>" + statusCode + " " + statusMessage + "</h1></body></html>";
-        return new HttpResponseWriter(statusCode, statusMessage,
-                "text/html; charset=UTF-8", htmlContent.getBytes(StandardCharsets.UTF_8));
+        if (!fileSent) {
+            // Fallback default HTML response if error page file is missing
+            String htmlContent = "<html><body><h1>" + statusCode + " " + statusMessage + "</h1></body></html>";
+            String response = "HTTP/1.1 " + statusCode + " " + statusMessage + "\r\n" +
+                    "Content-Type: text/html; charset=UTF-8\r\n" +
+                    "Content-Length: " + htmlContent.getBytes(StandardCharsets.UTF_8).length + "\r\n\r\n" +
+                    htmlContent;
+            try {
+                client.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
+            } catch (IOException e) {
+                System.out.println("⚠️ Could not send default error response: " + e.getMessage());
+            }
+        }
     }
 
     private String getStatusMessage(int code) {
@@ -51,10 +75,6 @@ public class error {
                 return "Payload Too Large";
             case 500:
                 return "Internal Server Error";
-            case 501:
-                return "Not Implemented";
-            case 503:
-                return "Service Unavailable";
             default:
                 return "Internal Error";
         }
