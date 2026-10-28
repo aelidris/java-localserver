@@ -4,9 +4,9 @@ A lightweight, custom HTTP/1.1-compliant web server built from scratch in Java u
 
 ## 🚀 Key Features
 
-- **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) operating on a single-process, single-thread model to handle high concurrency efficiently.
+- **Event-Driven Non-Blocking I/O:** Powered by Java NIO (`Selectors`, `Channels`) with one server event-loop thread. CGI programs run in child processes through `ProcessBuilder`, without application worker threads.
 - **HTTP Request Handling:** Supports `GET`, `POST`, and `DELETE`, with incremental header/body reads for `Content-Length` and chunked requests. Full HTTP/1.1 compliance remains in progress.
-- **CGI Handler:** Provides script execution through `ProcessBuilder`, request environment mapping, and response parsing. HTTP routing to the handler is not yet connected in `Server.java`.
+- **CGI Handler:** Configured file extensions execute through `ProcessBuilder`, with request environment mapping, binary stdin/stdout, response headers, and polling from the server event loop.
 - **Configuration Engine:** Validated JSON configuration for host/ports, body limits, error page paths, and custom routes with per-route roots, methods, redirects, and directory listings.
 - **Session & Cookie Management:** Built-in state handling for user sessions and cookies.
 - **Robust Error Handling & Safety:** Default custom HTML error pages for `400`, `403`, `404`, `405`, `413`, and `500` errors, designed to prevent crashes, memory leaks, and file descriptor exhaustion.
@@ -216,7 +216,80 @@ bodies, UTF-8 byte lengths, and custom/fallback error pages:
 bash test-responses.sh
 ```
 
-## CGI handler usage
+## CGI routes
+
+The example configuration enables `/cgi` using the trusted `./cgi` directory:
+
+```json
+{
+  "/cgi": {
+    "accepted_methods": ["GET", "POST"],
+    "root": "./cgi",
+    "default_file": "hello.py",
+    "cgi": { ".py": "python3" }
+  }
+}
+```
+
+With Python 3 available and the server running, try:
+
+```bash
+curl 'http://127.0.0.1:8080/cgi/hello.py/extra?name=world'
+curl --data-binary 'hello' 'http://127.0.0.1:8080/cgi/hello.py'
+```
+
+CGI mappings are case-sensitive extensions to a single executable name or path;
+shell commands and argument arrays are not accepted. Relative executable paths
+are resolved from the server's working directory. The resolved script is the
+interpreter's first argument, and its directory becomes the process working
+directory. Directory default files and file roots can also invoke CGI.
+
+The server waits for the complete request body, including decoded chunked input,
+and checks method permissions and script containment before starting a job.
+`REQUEST_METHOD`, raw `QUERY_STRING`, `CONTENT_TYPE`, actual `CONTENT_LENGTH`,
+`SERVER_NAME`, `SERVER_PORT`, `SERVER_PROTOCOL`, `REMOTE_ADDR`, and `REMOTE_PORT`
+are supplied. `Host`, `Cookie`, `Accept`, and `User-Agent` are forwarded through
+their `HTTP_*` variables; arbitrary request headers do not become environment
+variables. Repeated request cookies are joined with `; `.
+
+`SCRIPT_FILENAME` is the absolute resolved file, `SCRIPT_NAME` its URL path, and
+`PATH_INFO` the decoded suffix after the script. `PATH_TRANSLATED` maps that
+suffix through the configured route roots and is empty when `PATH_INFO` is empty.
+These distinctions follow the [CGI 1.1 variables](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.5).
+For `/cgi/hello.py/extra`, `PATH_INFO` is `/extra`, not the script's filesystem path.
+
+CGI-enabled roots are trusted program directories: POST/DELETE on those routes
+dispatch matching scripts, and do not upload or delete ordinary files. Other
+non-CGI routes cannot read or mutate paths inside a configured CGI root, including
+through resolved symlinks. Ordinary upload routes do not execute files just
+because they have a `.py` extension. Keep untrusted uploads outside CGI roots.
+
+Up to 16 CGI jobs run concurrently; additional CGI requests receive 503 while
+static requests remain available. Jobs are polled at most 50 ms apart while the
+event loop is otherwise idle, enforcing the handler's five-second timeout and
+2 MiB combined stdout/stderr limit. Execution, parsing, or resource-limit failures
+receive 500. TCP resets cancel jobs immediately when observed; a read-side FIN
+may be a valid half-close, so that job can finish and send its response, or time
+out. Completion, cancellation, and errors clean up CGI temporary files.
+
+The HTTP writer forwards parsed CGI status and headers (including repeated
+`Set-Cookie`), preserves binary bodies, and supplies its own response framing.
+Scripts' `Content-Length` values are discarded, and 204/304 responses omit body
+framing. Socket writes remain incremental.
+
+Run routing/response checks and the localhost integration suite (JDK 11+, Python
+3, and permission to bind a local socket):
+
+```bash
+bash test-cgi-routing.sh
+bash test-cgi-server.sh
+```
+
+The integration suite tests environment variables, binary/chunked POST, relative
+files, concurrent static requests, timeouts, output limits, connection reset and
+half-close, process capacity, cleanup, and script-root protection.
+
+## Standalone CGI handler usage
 
 `CGIHandler.start` launches an authorized script with a complete request body.
 Pass the interpreter as separate arguments; no shell command is constructed.
@@ -261,9 +334,8 @@ Response parsing accepts LF or CRLF headers, optional `Status`, repeated headers
 such as `Set-Cookie`, and binary bodies. Headers are limited to 16 KiB. A `Location`
 without `Status` produces a 302 client redirect; internal CGI redirects and NPH
 scripts are not implemented. Script-supplied `Content-Length` is discarded and
-hop-by-hop headers are rejected. The HTTP writer must supply framing and handle
-partial socket writes. Connecting jobs to HTTP routing and connection lifecycle
-management remains a separate server integration step.
+hop-by-hop headers are rejected. `Server` integrates polling and connection
+cleanup, and `HttpResponseWriter.fromCgi` supplies framing and partial writes.
 
 Run the standalone CGI regression checks with a JDK 11+ and POSIX shell utilities:
 

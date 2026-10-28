@@ -126,7 +126,7 @@ public class Router {
                 }
             }
 
-            if ((method.equals("POST") || method.equals("DELETE")) && isCgiRoot(target)) {
+            if (config.cgi.isEmpty() && isCgiRoot(target)) {
                 return failure(RouteStatus.FORBIDDEN);
             }
             if (method.equals("POST")) {
@@ -147,6 +147,9 @@ public class Router {
                     return failure(RouteStatus.FORBIDDEN);
                 }
                 if (Files.isRegularFile(index)) {
+                    if (config.cgi.isEmpty() && isCgiRoot(index)) {
+                        return failure(RouteStatus.FORBIDDEN);
+                    }
                     return new RequestResult(RouteStatus.OK, index.toString(), false);
                 }
                 if (!config.directoryListing) {
@@ -203,7 +206,8 @@ public class Router {
         if (Files.isDirectory(candidate)) {
             Path index = candidate.resolve(config.defaultFile).normalize();
             if (Files.isRegularFile(index)) {
-                return cgiResult(config, root, index, (path.endsWith("/") ? path : path + "/") + config.defaultFile, "");
+                String indexName = candidate.relativize(index).toString().replace(java.io.File.separatorChar, '/');
+                return cgiResult(config, root, index, (path.endsWith("/") ? path : path + "/") + indexName, "");
             }
         }
         return null;

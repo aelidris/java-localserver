@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,8 @@ public class Server {
     // handling)
     private final Map<SocketChannel, Long> clientLastActiveTime = new HashMap<>();
     private static final long TIMEOUT_MS = 60000; // 60 seconds timeout
+    private static final int MAX_CGI_JOBS = 16;
+    private final Map<SelectionKey, CGIHandler.Job> cgiJobs = new HashMap<>();
 
     public Server(ConfigLoader configLoader) {
         this.configLoader = configLoader;
@@ -31,29 +34,50 @@ public class Server {
 
     public void start() throws IOException {
         selector = Selector.open();
+        try {
+            runServer();
+        } finally {
+            for (SelectionKey key : new ArrayList<>(cgiJobs.keySet())) {
+                cancelCgi(key);
+            }
+            if (selector.isOpen()) {
+                for (SelectionKey key : new ArrayList<>(selector.keys())) {
+                    try {
+                        key.channel().close();
+                    } catch (IOException ignored) {
+                    }
+                }
+                selector.close();
+            }
+            clientLastActiveTime.clear();
+        }
+    }
+
+    private void runServer() throws IOException {
         String host = configLoader.getHost();
         List<Integer> ports = configLoader.getPorts();
 
         for (int port : ports) {
             ServerSocketChannel serverChannel = ServerSocketChannel.open();
-            serverChannel.configureBlocking(false);
-            serverChannel.bind(new InetSocketAddress(host, port));
-            serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+            try {
+                serverChannel.configureBlocking(false);
+                serverChannel.bind(new InetSocketAddress(host, port));
+                serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+            } catch (IOException | RuntimeException e) {
+                serverChannel.close();
+                throw e;
+            }
             System.out.println("🚀 Server listening on " + host + ":" + port);
         }
 
         System.out.println("⚡ Single-thread NIO Event Loop started with 60s Timeout.");
 
         while (true) {
-            // Wake up every 1 second to check for timed-out connections
-            int readyChannels = selector.select(1000);
+            // Poll running CGI jobs even without socket activity; otherwise check timeouts each second.
+            selector.select(cgiJobs.isEmpty() ? 1000 : 50);
 
             // Check and close inactive connections
             checkTimeouts();
-
-            if (readyChannels == 0) {
-                continue;
-            }
 
             Set<SelectionKey> selectedKeys = selector.selectedKeys();
             Iterator<SelectionKey> iterator = selectedKeys.iterator();
@@ -82,6 +106,7 @@ public class Server {
                     }
                 }
             }
+            pollCgiJobs();
         }
     }
 
@@ -107,6 +132,14 @@ public class Server {
 
     private void readData(SelectionKey key) throws IOException {
         SocketChannel client = (SocketChannel) key.channel();
+        if (cgiJobs.containsKey(key)) {
+            // A FIN may be a valid half-close: keep the response side alive, but stop reading.
+            // Resets raise IOException and cancel the job through closeClient.
+            if (client.read(ByteBuffer.allocate(1024)) == -1) {
+                key.interestOps(0);
+            }
+            return;
+        }
 
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         int bytesRead = client.read(buffer);
@@ -163,6 +196,9 @@ public class Server {
                     sendFile(key, result.filePath);
                 }
                 break;
+            case CGI:
+                startCgi(key, request, result.cgi);
+                break;
             case REDIRECT:
                 queueResponse(key, HttpResponseWriter.redirect(result.redirect.status, result.redirect.location));
                 break;
@@ -200,6 +236,7 @@ public class Server {
             if (currentTime - lastActive > TIMEOUT_MS) {
                 SelectionKey key = client.keyFor(selector);
                 if (key != null) {
+                    cancelCgi(key);
                     key.attach(null);
                     key.cancel();
                 }
@@ -224,6 +261,7 @@ public class Server {
         System.out.println(logMessage);
         clientLastActiveTime.remove(client);
         if (key != null) {
+            cancelCgi(key);
             key.attach(null);
             key.cancel();
         }
@@ -231,6 +269,73 @@ public class Server {
             client.close();
         } catch (IOException e) {
             System.out.println("⚠️ Error closing client: " + e.getMessage());
+        }
+    }
+
+    private void startCgi(SelectionKey key, HttpRequestReader request, Router.CgiTarget target) {
+        if (cgiJobs.size() >= MAX_CGI_JOBS) {
+            sendError(key, 503);
+            return;
+        }
+        try {
+            SocketChannel client = (SocketChannel) key.channel();
+            InetSocketAddress local = (InetSocketAddress) client.getLocalAddress();
+            InetSocketAddress remote = (InetSocketAddress) client.getRemoteAddress();
+            Map<String, String> environment = new HashMap<>();
+            environment.put("REQUEST_METHOD", request.getMethod());
+            environment.put("REQUEST_URI", request.getUri());
+            environment.put("SCRIPT_NAME", target.scriptName);
+            environment.put("PATH_INFO", target.pathInfo);
+            environment.put("PATH_TRANSLATED", target.pathTranslated);
+            int query = request.getUri().indexOf('?');
+            environment.put("QUERY_STRING", query >= 0 ? request.getUri().substring(query + 1) : "");
+            environment.put("CONTENT_TYPE", request.getHeader("Content-Type"));
+            environment.put("SERVER_NAME", configLoader.getHost());
+            environment.put("SERVER_PORT", Integer.toString(local.getPort()));
+            environment.put("SERVER_PROTOCOL", "HTTP/1.1");
+            environment.put("REMOTE_ADDR", remote.getAddress().getHostAddress());
+            environment.put("REMOTE_PORT", Integer.toString(remote.getPort()));
+            for (String header : List.of("Host", "Cookie", "Accept", "User-Agent")) {
+                environment.put("HTTP_" + header.toUpperCase(java.util.Locale.ROOT).replace('-', '_'), request.getHeader(header));
+            }
+            CGIHandler.Job job = CGIHandler.start(target.script, List.of(target.interpreter), environment, request.getBody());
+            cgiJobs.put(key, job);
+            key.attach(job);
+            key.interestOps(SelectionKey.OP_READ);
+        } catch (IOException | RuntimeException e) {
+            cancelCgi(key);
+            sendError(key, 500);
+        }
+    }
+
+    private void pollCgiJobs() {
+        for (Map.Entry<SelectionKey, CGIHandler.Job> entry : new ArrayList<>(cgiJobs.entrySet())) {
+            SelectionKey key = entry.getKey();
+            if (!key.isValid()) {
+                closeClient((SocketChannel) key.channel(), key, "CGI client closed.");
+                continue;
+            }
+            try {
+                CGIHandler.Response response = entry.getValue().poll();
+                if (response != null) {
+                    cgiJobs.remove(key);
+                    queueResponse(key, HttpResponseWriter.fromCgi(response));
+                }
+            } catch (IOException | RuntimeException e) {
+                cancelCgi(key);
+                sendError(key, 500);
+            }
+        }
+    }
+
+    private void cancelCgi(SelectionKey key) {
+        CGIHandler.Job job = cgiJobs.remove(key);
+        if (job != null) {
+            try {
+                job.close();
+            } catch (IOException | RuntimeException e) {
+                System.err.println("Could not clean up CGI job: " + e.getMessage());
+            }
         }
     }
 
