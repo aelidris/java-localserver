@@ -57,6 +57,12 @@ public class CGIHandler {
 
             process.waitFor();
 
+            // // To check 500 internal server error
+            // int exitCode = process.exitValue();
+            // if (exitCode != 0) {
+            //     throw new RuntimeException("CGI script exited with non-zero status code: " + exitCode);
+            // }
+
             // Return response as string (UTF-8)
             return buffer.toString(StandardCharsets.UTF_8.name());
 

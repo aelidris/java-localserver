@@ -2,6 +2,10 @@
 import os
 import sys
 
+# add sys.exit(1) if you want to check internal server error 500
+# sys.exit(1)
+
+
 # Send HTTP headers including Set-Cookie
 print("Content-Type: text/plain")
 print("Set-Cookie: SESSION_ID=audit_token_12345; Path=/")

@@ -18,7 +18,8 @@ public class Server {
     private final error errorHandler;
     private Selector selector;
 
-    // Map to track last activity time for each client connection (for timeout handling)
+    // Map to track last activity time for each client connection (for timeout
+    // handling)
     private final Map<SocketChannel, Long> clientLastActiveTime = new HashMap<>();
     private static final long TIMEOUT_MS = 60000; // 60 seconds timeout
 
@@ -168,16 +169,23 @@ public class Server {
                 try {
                     String queryString = uri.contains("?") ? uri.split("\\?")[1] : "";
                     String requestBody = method.equals("POST") ? extractRequestBody(requestData) : "";
-                    
+
                     Map<String, String> env = new HashMap<>();
                     if (cookieHeader != null) {
                         env.put("HTTP_COOKIE", cookieHeader);
                     }
 
                     // Execute CGI script via CGIHandler
-                    String cgiRawResponse = CGIHandler.executeCGI(result.filePath, method, queryString, requestBody, env);
+                    String cgiRawResponse = CGIHandler.executeCGI(result.filePath, method, queryString, requestBody,
+                            env);
 
-                    String finalResponse = "HTTP/1.1 200 OK\r\n" + cgiRawResponse;
+                    String finalResponse;
+                    
+                    if (cgiRawResponse.startsWith("HTTP/1.1")) {
+                        finalResponse = cgiRawResponse;
+                    } else {
+                        finalResponse = "HTTP/1.1 200 OK\r\n" + cgiRawResponse;
+                    }
 
                     client.write(ByteBuffer.wrap(finalResponse.getBytes(StandardCharsets.UTF_8)));
                     closeClient(client, key, "📤 Handled CGI request successfully.");
