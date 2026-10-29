@@ -221,6 +221,12 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
             config["routes"]["/assets/"] = {"root": "./assets", "default_file": "welcome.html", "accepted_methods": ["GET"]}
             config["routes"]["/assets/icons"] = {"root": "./icons", "accepted_methods": ["GET"]}
             config["routes"]["/files"] = {"root": "./custom uploads", "accepted_methods": ["POST", "DELETE"]}
+            (assets / "keep.txt").write_bytes(b"Keep this file")
+            for code in (301, 302, 303, 307, 308):
+                config["routes"][f"/move{code}"] = {
+                    "root": "./assets", "accepted_methods": ["GET", "POST", "DELETE"],
+                    "redirect": {"status": code, "location": "/assets/logo.txt"}}
+            config["routes"]["/old"] = {"redirect": {"location": "/assets/"}}
             (work / "config.json").write_text(json.dumps(config))
             server = subprocess.Popen(["java", "-cp", str(work / "classes"), "Main"],
                                       cwd=work, stdout=log, stderr=log)
@@ -257,6 +263,22 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
             assert status(b"DELETE /files/data.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") == 200
             assert not (work / "custom uploads/data.txt").exists()
             print("PASS: custom/nested routes, default indexes, query strings and route-specific upload/delete permissions.")
+            for code in (301, 302, 303, 307, 308):
+                for method in (b"GET", b"POST", b"DELETE"):
+                    with connect() as client:
+                        client.sendall(method + f" /move{code}/keep.txt?x=ignored HTTP/1.1\r\n".encode()
+                                       + b"Host: localhost\r\nContent-Length: 0\r\n\r\n")
+                        headers, body = receive(client).split(b"\r\n\r\n", 1)
+                        assert int(headers.split(b" ", 2)[1]) == code
+                        assert b"\r\nLocation: /assets/logo.txt\r\n" in headers
+                        assert b"Content-Length: 0" in headers and body == b""
+                    assert (assets / "keep.txt").read_bytes() == b"Keep this file"
+            assert status(b"GET /old HTTP/1.1\r\nHost: localhost\r\n\r\n") == 302
+            assert status(b"POST /old HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n") == 405
+            followed = subprocess.run(["curl", "--fail", "--silent", "--show-error", "--location", "--max-redirs", "3",
+                                       "--max-time", "5", f"http://127.0.0.1:{port}/old"], capture_output=True, check=True)
+            assert followed.stdout == b"Assets index"
+            print("PASS: redirect statuses, Location, empty body, method permissions, no file mutation and curl follow.")
         except Exception:
             log.flush()
             log.seek(0)

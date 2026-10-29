@@ -12,7 +12,7 @@ public class Router {
     public Router(ConfigLoader configLoader) { this.configLoader = configLoader; }
 
     public enum RouteStatus {
-        OK, CGI, BAD_REQUEST, NOT_FOUND, FORBIDDEN, METHOD_NOT_ALLOWED,
+        OK, CGI, REDIRECT, BAD_REQUEST, NOT_FOUND, FORBIDDEN, METHOD_NOT_ALLOWED,
         PAYLOAD_TOO_LARGE, INTERNAL_SERVER_ERROR
     }
 
@@ -20,6 +20,7 @@ public class Router {
         public RouteStatus status;
         public String filePath;
         public boolean isDirectory;
+        public ConfigLoader.RedirectConfig redirect;
 
         public RequestResult(RouteStatus status, String filePath, boolean isDirectory) {
             this.status = status;
@@ -40,6 +41,11 @@ public class Router {
         String routePath = findRoute(path);
         ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routePath);
         if (!config.acceptedMethods.contains(method)) return error(RouteStatus.METHOD_NOT_ALLOWED);
+        if (config.redirect != null) {
+            RequestResult result = new RequestResult(RouteStatus.REDIRECT, null, false);
+            result.redirect = config.redirect;
+            return result;
+        }
 
         // Strip the matched prefix: /images/logo.png -> <images root>/logo.png.
         String relative = path.substring(routePath.equals("/") ? 1 : routePath.length());

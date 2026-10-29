@@ -92,7 +92,7 @@ and paths containing `.` or `..` segments, repeated slashes, queries or fragment
 If `routes` is provided, it must contain `/`. Omitted route methods default to GET;
 the default file is `index.html`, and directory listing defaults to false.
 The listing flag is parsed, but generating directory listings is still pending.
-Redirects, CGI mappings and multiple server configurations are later steps.
+CGI mappings and multiple server configurations are later steps.
 
 For example, add this entry inside `routes` to serve `/images/logo.png` from
 `./public/images/logo.png`:
@@ -111,6 +111,23 @@ and DELETE work on custom routes when explicitly enabled. Existing file roots
 serve only the exact route path; directory roots use the remaining URL path.
 GET checks the configured default file inside each requested directory.
 Path checks reject traversal and symlinks leading outside the selected root.
+
+To redirect a route, add a `redirect` object:
+
+```json
+"/old": {
+  "accepted_methods": ["GET"],
+  "redirect": {"status": 301, "location": "/new"}
+}
+```
+
+Supported statuses are 301, 302 (the default), 303, 307 and 308. The location must
+be a path starting with a single `/` or an absolute HTTP(S) URL. Spaces, control
+characters and malformed URIs are rejected at startup; Unicode is percent-encoded.
+The configured location is used as-is for the whole route, without appending the
+original path suffix or query. Methods are checked first; an allowed redirect
+returns an empty body and a `Location` header without accessing the route's files.
+Use `bash test-redirects.sh` to test configuration, routing and partial writes for redirects.
 
 Run `bash test-config.sh` for configuration checks, `bash test-routing.sh` for
 routing checks, and `python3 test-resilience.py` for HTTP tests, including custom

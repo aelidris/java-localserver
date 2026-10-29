@@ -24,6 +24,23 @@ public class HttpResponseWriter {
         return new HttpResponseWriter(new byte[0], response);
     }
 
+    public static HttpResponseWriter redirect(int status, String location) {
+        String reason = switch (status) {
+            case 301 -> "Moved Permanently";
+            case 302 -> "Found";
+            case 303 -> "See Other";
+            case 307 -> "Temporary Redirect";
+            case 308 -> "Permanent Redirect";
+            default -> throw new IllegalArgumentException("Unsupported redirect status");
+        };
+        if (location.isEmpty() || location.chars().anyMatch(c -> c <= 32 || c >= 127)) {
+            throw new IllegalArgumentException("Location must be an encoded URI without controls or spaces");
+        }
+        String headers = "HTTP/1.1 " + status + " " + reason + "\r\nLocation: " + location
+                + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        return new HttpResponseWriter(headers.getBytes(StandardCharsets.US_ASCII), new byte[0]);
+    }
+
     // One write per writable event leaves time for the other connections.
     public int writeTo(WritableByteChannel channel) throws IOException {
         if (headers.hasRemaining()) return channel.write(headers);

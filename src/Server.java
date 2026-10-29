@@ -218,6 +218,9 @@ public class Server {
                     sendError(client, key, 500);
                 }
                 break;
+            case REDIRECT:
+                queueResponse(key, HttpResponseWriter.redirect(result.redirect.status(), result.redirect.location()));
+                break;
             case BAD_REQUEST:
                 sendError(client, key, 400);
                 break;

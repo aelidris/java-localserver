@@ -1,6 +1,7 @@
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -24,7 +25,10 @@ public class ConfigLoader {
         public String root = "./public";
         public String defaultFile = "index.html";
         public boolean directoryListing = false;
+        public RedirectConfig redirect;
     }
+
+    public record RedirectConfig(int status, String location) { }
 
     public ConfigLoader(String configPath) { this.configPath = configPath; }
 
@@ -92,7 +96,7 @@ public class ConfigLoader {
     }
 
     private RouteConfig route(String name, Map<String, Object> values) {
-        keys(values, "accepted_methods", "root", "default_file", "directory_listing");
+        keys(values, "accepted_methods", "root", "default_file", "directory_listing", "redirect");
         RouteConfig route = new RouteConfig();
         List<String> methods = new ArrayList<>();
         for (Object value : array(values.getOrDefault("accepted_methods", List.of("GET")), name + " methods")) {
@@ -113,7 +117,21 @@ public class ConfigLoader {
         Object listing = values.getOrDefault("directory_listing", false);
         if (!(listing instanceof Boolean)) throw invalid("directory_listing must be true or false: " + name);
         route.directoryListing = (boolean) listing;
+        if (values.containsKey("redirect")) route.redirect = redirect(object(values.get("redirect"), name + " redirect"));
         return route;
+    }
+
+    private RedirectConfig redirect(Map<String, Object> values) {
+        keys(values, "status", "location");
+        int status = (int) integer(values.getOrDefault("status", new BigDecimal(302)), "redirect status", 300, 399);
+        if (!Set.of(301, 302, 303, 307, 308).contains(status)) throw invalid("Unsupported redirect status: " + status);
+        String location = string(values.get("location"), "redirect location");
+        URI uri = URI.create(location);
+        boolean local = location.startsWith("/") && !location.startsWith("//");
+        boolean external = ("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                && uri.getHost() != null;
+        if (!local && !external) throw invalid("redirect location must start with / or be an HTTP(S) URL");
+        return new RedirectConfig(status, uri.toASCIIString());
     }
 
     @SuppressWarnings("unchecked")
