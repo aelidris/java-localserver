@@ -83,14 +83,38 @@ Ports must be between 1 and 65535; the body limit is between 0 and 2147483639 by
 Paths are relative to the working directory used to start the server. Missing custom
 error pages use the built-in error response.
 
-At this stage, only `/` and `/uploads` routes are supported; other routes are rejected.
+Routes can use custom prefixes such as `/images` or `/api/files`.
+The longest matching path prefix wins at a segment boundary: `/images/icons`
+takes precedence over `/images`, while `/images-old` does not match `/images`.
+A trailing slash in a configured prefix is removed; duplicate normalized prefixes
+and paths containing `.` or `..` segments, repeated slashes, queries or fragments are rejected.
+
 If `routes` is provided, it must contain `/`. Omitted route methods default to GET;
 the default file is `index.html`, and directory listing defaults to false.
 The listing flag is parsed, but generating directory listings is still pending.
-Custom routes, redirects, CGI mappings and multiple server configurations are later steps.
+Redirects, CGI mappings and multiple server configurations are later steps.
 
-Run `bash test-config.sh` for configuration checks and `python3 test-resilience.py`
-for HTTP tests, including custom roots and default files.
+For example, add this entry inside `routes` to serve `/images/logo.png` from
+`./public/images/logo.png`:
+
+```json
+"/images": {
+  "root": "./public/images",
+  "accepted_methods": ["GET"],
+  "default_file": "index.html",
+  "directory_listing": false
+}
+```
+
+Each route applies its allowed methods, including to CGI requests. POST uploads
+and DELETE work on custom routes when explicitly enabled. Existing file roots
+serve only the exact route path; directory roots use the remaining URL path.
+GET checks the configured default file inside each requested directory.
+Path checks reject traversal and symlinks leading outside the selected root.
+
+Run `bash test-config.sh` for configuration checks, `bash test-routing.sh` for
+routing checks, and `python3 test-resilience.py` for HTTP tests, including custom
+and nested routes, roots, default files, uploads and deletes.
 
 ---
 

@@ -218,6 +218,9 @@ public class Server {
                     sendError(client, key, 500);
                 }
                 break;
+            case BAD_REQUEST:
+                sendError(client, key, 400);
+                break;
             case METHOD_NOT_ALLOWED:
                 sendError(client, key, 405);
                 break;

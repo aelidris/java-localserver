@@ -1,22 +1,19 @@
+import java.io.IOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 
 public class Router {
     private final ConfigLoader configLoader;
 
-    public Router(ConfigLoader configLoader) {
-        this.configLoader = configLoader;
-    }
+    public Router(ConfigLoader configLoader) { this.configLoader = configLoader; }
 
     public enum RouteStatus {
-        OK,
-        CGI,
-        NOT_FOUND,
-        FORBIDDEN,
-        METHOD_NOT_ALLOWED,
-        PAYLOAD_TOO_LARGE,
-        INTERNAL_SERVER_ERROR
+        OK, CGI, BAD_REQUEST, NOT_FOUND, FORBIDDEN, METHOD_NOT_ALLOWED,
+        PAYLOAD_TOO_LARGE, INTERNAL_SERVER_ERROR
     }
 
     public static class RequestResult {
@@ -32,92 +29,84 @@ public class Router {
     }
 
     public RequestResult route(String method, String uri) {
-        // Normalize path (e.g., "/" -> index.html)
-        String pathWithoutQuery = uri.split("\\?")[0];
-
-        // Check route config
-        String routeKey = pathWithoutQuery.startsWith("/uploads") ? "/uploads" : "/";
-        ConfigLoader.RouteConfig routeConfig = configLoader.getRouteConfig(routeKey);
-
-        if (routeConfig == null) {
-            // Fallback default rules if route not explicitly defined
-            routeConfig = new ConfigLoader.RouteConfig();
+        int query = uri.indexOf('?');
+        String path = query < 0 ? uri : uri.substring(0, query);
+        if (!path.startsWith("/") || path.contains("//") || path.contains("\\") || path.contains("#")
+                || path.chars().anyMatch(c -> c <= 32 || c == 127)) return error(RouteStatus.BAD_REQUEST);
+        for (String segment : path.split("/")) {
+            if (segment.equals(".") || segment.equals("..")) return error(RouteStatus.FORBIDDEN);
         }
 
-        // Check if HTTP Method is allowed -> 405 Method Not Allowed
-        if (!routeConfig.acceptedMethods.contains(method) && !pathWithoutQuery.endsWith(".py")) {
-            return new RequestResult(RouteStatus.METHOD_NOT_ALLOWED, null, false);
-        }
+        String routePath = findRoute(path);
+        ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routePath);
+        if (!config.acceptedMethods.contains(method)) return error(RouteStatus.METHOD_NOT_ALLOWED);
 
-        // Security Protection: Prevent POST/DELETE directly on root index.html to avoid overwriting content (Allowed for CGI .py files)
-        if (method.equals("POST") && !pathWithoutQuery.startsWith("/uploads") && !pathWithoutQuery.endsWith(".py")) {
-            return new RequestResult(RouteStatus.METHOD_NOT_ALLOWED, null, false);
-        }
+        // Strip the matched prefix: /images/logo.png -> <images root>/logo.png.
+        String relative = path.substring(routePath.equals("/") ? 1 : routePath.length());
+        if (relative.startsWith("/")) relative = relative.substring(1);
+        try {
+            Path root = Path.of(config.root).toAbsolutePath().normalize();
+            boolean fileRoot = Files.isRegularFile(root);
+            if (fileRoot && !relative.isEmpty()) return error(RouteStatus.NOT_FOUND);
+            Path target = fileRoot ? root : root.resolve(relative).normalize();
+            if (!insideRoot(root, target)) return error(RouteStatus.FORBIDDEN);
 
-        // Resolve file path based on root and URI
-        String relativePath = pathWithoutQuery.startsWith("/uploads")
-                ? pathWithoutQuery.substring(8)
-                : (pathWithoutQuery.equals("/") ? "/" + routeConfig.defaultFile : pathWithoutQuery);
-
-        if (relativePath.isEmpty() || relativePath.equals("/")) {
-            relativePath = "/" + (routeConfig.defaultFile != null ? routeConfig.defaultFile : "");
-        }
-
-        String targetPath = routeConfig.root + relativePath;
-        Path fullPath = Paths.get(targetPath).normalize();
-
-        // Security check: ensure path stays inside root directory (prevent path
-        // traversal)
-        Path rootPath = Paths.get(routeConfig.root).normalize();
-        if (!fullPath.startsWith(rootPath)) {
-            return new RequestResult(RouteStatus.FORBIDDEN, null, false);
-        }
-
-        // Check script CGI (end with .py)
-        if (pathWithoutQuery.endsWith(".py")) {
-            if (Files.exists(fullPath) && Files.isRegularFile(fullPath)) {
-                return new RequestResult(RouteStatus.CGI, fullPath.toString(), false);
-            } else {
-                return new RequestResult(RouteStatus.NOT_FOUND, null, false);
+            if (method.equals("GET") && Files.isDirectory(target)) {
+                Path index = target.resolve(config.defaultFile).normalize();
+                if (!insideRoot(root, index)) return error(RouteStatus.FORBIDDEN);
+                if (Files.isRegularFile(index)) target = index;
+                else if (!config.directoryListing) return error(RouteStatus.FORBIDDEN);
+                else return new RequestResult(RouteStatus.OK, target.toString(), true);
             }
-        }
-        // Check if file/directory exists
-        if (!Files.exists(fullPath)) {
+
+            // CGI still uses .py for now, but must obey the route's allowed methods.
+            if (target.toString().endsWith(".py")) {
+                return Files.isRegularFile(target)
+                        ? new RequestResult(RouteStatus.CGI, target.toString(), false)
+                        : error(RouteStatus.NOT_FOUND);
+            }
             if (method.equals("POST")) {
-                return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
+                if ((!fileRoot && relative.isEmpty()) || Files.isDirectory(target)) return error(RouteStatus.FORBIDDEN);
+                if (Files.exists(target) && !Files.isRegularFile(target)) return error(RouteStatus.FORBIDDEN);
+                return new RequestResult(RouteStatus.OK, target.toString(), false);
             }
-            return new RequestResult(RouteStatus.NOT_FOUND, null, false);
+            if (!Files.exists(target)) return error(RouteStatus.NOT_FOUND);
+            if (!Files.isRegularFile(target)) return error(RouteStatus.FORBIDDEN);
+            if (method.equals("DELETE")) Files.delete(target);
+            return new RequestResult(RouteStatus.OK, target.toString(), false);
+        } catch (InvalidPathException e) {
+            return error(RouteStatus.BAD_REQUEST);
+        } catch (NoSuchFileException e) {
+            return error(RouteStatus.NOT_FOUND);
+        } catch (AccessDeniedException e) {
+            return error(RouteStatus.FORBIDDEN);
+        } catch (IOException e) {
+            return error(RouteStatus.INTERNAL_SERVER_ERROR);
         }
-
-        // Check for Directory -> 403 Forbidden (if directory listing is false)
-        if (Files.isDirectory(fullPath)) {
-            if (!routeConfig.directoryListing) {
-                return new RequestResult(RouteStatus.FORBIDDEN, fullPath.toString(), true);
-            }
-        }
-
-        // Handle specific methods logic (GET, POST, DELETE)
-        if (method.equals("POST")) {
-            return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
-        } else if (method.equals("DELETE")) {
-            return handleDeleteMapping(fullPath);
-        }
-
-        // Default GET OK
-        return new RequestResult(RouteStatus.OK, fullPath.toString(), false);
     }
 
-    private RequestResult handleDeleteMapping(Path path) {
-        try {
-            // Ensure we don't delete the root folder itself
-            if (Files.isRegularFile(path)) {
-                Files.delete(path);
-                return new RequestResult(RouteStatus.OK, path.toString(), false);
-            } else {
-                return new RequestResult(RouteStatus.FORBIDDEN, null, false);
+    private String findRoute(String path) {
+        String best = "/";
+        for (String candidate : configLoader.getRoutePaths()) {
+            if ((path.equals(candidate) || path.startsWith(candidate + "/")) && candidate.length() > best.length()) {
+                best = candidate;
             }
-        } catch (Exception e) {
-            return new RequestResult(RouteStatus.INTERNAL_SERVER_ERROR, null, false);
         }
+        return best;
+    }
+
+    private boolean insideRoot(Path root, Path target) throws IOException {
+        return target.startsWith(root) && realPath(target).startsWith(realPath(root));
+    }
+
+    // Resolve existing parents too: an upload's destination may not exist yet.
+    private Path realPath(Path path) throws IOException {
+        Path existing = path;
+        while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) existing = existing.getParent();
+        return existing.toRealPath().resolve(existing.relativize(path)).normalize();
+    }
+
+    private RequestResult error(RouteStatus status) {
+        return new RequestResult(status, null, false);
     }
 }

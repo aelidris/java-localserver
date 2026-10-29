@@ -210,6 +210,17 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
             (site / "images").mkdir()
             config["routes"]["/"].update(root="./configured site", default_file="welcome.html", directory_listing=False)
             config["routes"]["/uploads"]["root"] = "./saved files"
+            assets = work / "assets"
+            assets.mkdir()
+            (assets / "welcome.html").write_bytes(b"Assets index")
+            (assets / "logo.txt").write_bytes(b"Parent route")
+            (site / "images-old").write_bytes(b"Root fallback")
+            icons = work / "icons"
+            icons.mkdir()
+            (icons / "logo.txt").write_bytes(b"Nested route")
+            config["routes"]["/assets/"] = {"root": "./assets", "default_file": "welcome.html", "accepted_methods": ["GET"]}
+            config["routes"]["/assets/icons"] = {"root": "./icons", "accepted_methods": ["GET"]}
+            config["routes"]["/files"] = {"root": "./custom uploads", "accepted_methods": ["POST", "DELETE"]}
             (work / "config.json").write_text(json.dumps(config))
             server = subprocess.Popen(["java", "-cp", str(work / "classes"), "Main"],
                                       cwd=work, stdout=log, stderr=log)
@@ -230,6 +241,22 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
             assert (work / "saved files/config.txt").read_bytes() == b"data"
             assert not (work / "uploads/config.txt").exists()
             print("PASS: configured roots, default file, directory access flag and upload destination.")
+            for path, content in ((b"/assets", b"Assets index"), (b"/assets/", b"Assets index"),
+                                  (b"/assets/logo.txt?x=1", b"Parent route"),
+                                  (b"/assets/icons/logo.txt", b"Nested route"), (b"/images-old", b"Root fallback")):
+                with connect() as client:
+                    client.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    response = receive(client)
+                    assert response.startswith(b"HTTP/1.1 200 ")
+                    assert response.endswith(b"\r\n\r\n" + content)
+            assert status(b"POST /assets/logo.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n") == 405
+            assert (assets / "logo.txt").read_bytes() == b"Parent route"
+            assert status(b"POST /files/data.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\ndata") == 201
+            assert (work / "custom uploads/data.txt").read_bytes() == b"data"
+            assert status(b"GET /files/data.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") == 405
+            assert status(b"DELETE /files/data.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") == 200
+            assert not (work / "custom uploads/data.txt").exists()
+            print("PASS: custom/nested routes, default indexes, query strings and route-specific upload/delete permissions.")
         except Exception:
             log.flush()
             log.seek(0)

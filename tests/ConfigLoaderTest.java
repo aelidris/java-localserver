@@ -73,7 +73,16 @@ public class ConfigLoaderTest {
                     "{\"client_max_body_size\":2147483648}", "{\"client_max_body_size\":1.1}",
                     "{\"unknown\":1}", "{\"error_pages\":[]}", "{\"error_pages\":{\"200\":\"x\"}}",
                     "{\"error_pages\":{\"404\":null}}", "{\"routes\":{}}", "{\"routes\":null}",
-                    "{\"routes\":{\"/\":{},\"/other\":{}}}")) rejected(invalid);
+                    "{\"routes\":{\"/\":{},\"other\":{}}}")) rejected(invalid);
+            ConfigLoader custom = load("{\"routes\":{\"/\":{},\"/images/\":{},\"/images/icons\":{}}}");
+            check(custom.getRoutePaths().contains("/images"));
+            check(custom.getRoutePaths().contains("/images/icons"));
+            check(!custom.getRoutePaths().contains("/images/"));
+            for (String path : List.of("//images", "/images//icons", "/../images", "/images/./icons",
+                    "/images?x", "/images#x", "/im ages", "/im%61ges")) {
+                rejected("{\"routes\":{\"/\":{},\"" + path + "\":{}}}");
+            }
+            rejected("{\"routes\":{\"/\":{},\"/images\":{},\"/images/\":{}}}");
             for (String route : List.of("null", "[]", "{\"accepted_methods\":[]}",
                     "{\"accepted_methods\":[\"PUT\"]}", "{\"accepted_methods\":[\"GET\",\"GET\"]}",
                     "{\"root\":null}", "{\"root\":\"bad\\u0000path\"}", "{\"default_file\":\"../x\"}",

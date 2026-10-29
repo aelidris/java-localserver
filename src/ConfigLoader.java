@@ -61,11 +61,9 @@ public class ConfigLoader {
             Map<String, RouteConfig> newRoutes = new HashMap<>();
             Map<String, Object> routeValues = object(config.getOrDefault("routes", Map.of("/", Map.of())), "routes");
             for (var entry : routeValues.entrySet()) {
-                // Router currently handles these two routes. More routes come next.
-                if (!Set.of("/", "/uploads").contains(entry.getKey())) {
-                    throw invalid("Unsupported route: " + entry.getKey() + " (currently / and /uploads)");
-                }
-                newRoutes.put(entry.getKey(), route(entry.getKey(), object(entry.getValue(), "route " + entry.getKey())));
+                String name = routePath(entry.getKey());
+                if (newRoutes.containsKey(name)) throw invalid("Duplicate route: " + name);
+                newRoutes.put(name, route(name, object(entry.getValue(), "route " + name)));
             }
             if (!newRoutes.containsKey("/")) throw invalid("routes must include /");
 
@@ -79,6 +77,18 @@ public class ConfigLoader {
         } catch (IOException | IllegalArgumentException e) {
             throw new ConfigException("Invalid config " + configPath + ": " + e.getMessage());
         }
+    }
+
+    private String routePath(String name) {
+        if (!name.startsWith("/") || name.contains("//") || name.contains("\\")
+                || name.contains("?") || name.contains("#") || name.contains("%")
+                || name.chars().anyMatch(c -> c <= 32 || c == 127)) {
+            throw invalid("Invalid route path: " + name);
+        }
+        for (String segment : name.split("/")) {
+            if (segment.equals(".") || segment.equals("..")) throw invalid("Invalid route path: " + name);
+        }
+        return name.length() > 1 && name.endsWith("/") ? name.substring(0, name.length() - 1) : name;
     }
 
     private RouteConfig route(String name, Map<String, Object> values) {
@@ -151,6 +161,7 @@ public class ConfigLoader {
     public long getMaxBodySize() { return maxBodySize; }
     public String getErrorPagePath(int code) { return errorPages.get(code); }
     public RouteConfig getRouteConfig(String path) { return routes.get(path); }
+    public Set<String> getRoutePaths() { return routes.keySet(); }
 
     public static class ConfigException extends IllegalArgumentException {
         public ConfigException(String message) { super(message); }
