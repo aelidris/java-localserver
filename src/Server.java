@@ -65,10 +65,21 @@ public class Server {
                 if (!key.isValid())
                     continue;
 
-                if (key.isAcceptable()) {
-                    acceptConnection(key);
-                } else if (key.isReadable()) {
-                    readData(key);
+                try {
+                    if (key.isAcceptable()) {
+                        acceptConnection(key);
+                    } else if (key.isReadable()) {
+                        readData(key);
+                    }
+                } catch (IOException | RuntimeException e) {
+                    System.err.println("Connection error: " + e.getMessage());
+                    if (key.channel() instanceof SocketChannel client) {
+                        if (e instanceof IOException) {
+                            closeClient(client, key, "Client connection failed.");
+                        } else {
+                            sendError(client, key, 500);
+                        }
+                    }
                 }
             }
         }
@@ -77,8 +88,15 @@ public class Server {
     private void acceptConnection(SelectionKey key) throws IOException {
         ServerSocketChannel server = (ServerSocketChannel) key.channel();
         SocketChannel client = server.accept();
-        client.configureBlocking(false);
-        client.register(selector, SelectionKey.OP_READ);
+        if (client == null) return;
+
+        try {
+            client.configureBlocking(false);
+            client.register(selector, SelectionKey.OP_READ);
+        } catch (IOException | RuntimeException e) {
+            client.close();
+            throw e;
+        }
 
         // Record connection time
         clientLastActiveTime.put(client, System.currentTimeMillis());
@@ -97,9 +115,6 @@ public class Server {
     private void readData(SelectionKey key) throws IOException {
         SocketChannel client = (SocketChannel) key.channel();
 
-        // Refresh last active time on new data
-        clientLastActiveTime.put(client, System.currentTimeMillis());
-
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         int bytesRead = client.read(buffer);
 
@@ -107,6 +122,8 @@ public class Server {
             closeClient(client, key, "🔌 Client disconnected.");
             return;
         }
+        if (bytesRead == 0) return;
+        clientLastActiveTime.put(client, System.currentTimeMillis());
 
         String requestData = new String(buffer.array(), 0, bytesRead);
         System.out.println("📥 Received request:\n" + requestData);
@@ -117,14 +134,20 @@ public class Server {
             return;
         }
 
-        String[] requestLineParts = lines[0].split(" ");
-        if (requestLineParts.length < 2) {
+        String[] requestLineParts = lines[0].split(" ", -1);
+        if (requestLineParts.length != 3 || requestLineParts[0].isEmpty()
+                || !requestLineParts[2].equals("HTTP/1.1")) {
             sendError(client, key, 400);
             return;
         }
 
         String method = requestLineParts[0];
         String uri = requestLineParts[1];
+        if (!uri.startsWith("/") || uri.contains("#")
+                || uri.chars().anyMatch(c -> c <= 32 || c == 127)) {
+            sendError(client, key, 400);
+            return;
+        }
 
         // Parse Cookie header if available
         String cookieHeader = parseHeaderValue(lines, "Cookie:");
@@ -132,6 +155,10 @@ public class Server {
         // Check Content-Length for Payload Too Large (413) on POST requests
         if (method.equals("POST")) {
             long contentLength = parseContentLength(lines);
+            if (contentLength < 0) {
+                sendError(client, key, 400);
+                return;
+            }
             if (contentLength > configLoader.getMaxBodySize()) {
                 sendError(client, key, 413);
                 return;
@@ -167,7 +194,8 @@ public class Server {
                 break;
             case CGI:
                 try {
-                    String queryString = uri.contains("?") ? uri.split("\\?")[1] : "";
+                    int queryStart = uri.indexOf('?');
+                    String queryString = queryStart < 0 ? "" : uri.substring(queryStart + 1);
                     String requestBody = method.equals("POST") ? extractRequestBody(requestData) : "";
 
                     Map<String, String> env = new HashMap<>();
@@ -240,13 +268,11 @@ public class Server {
     }
 
     private void closeClient(SocketChannel client, SelectionKey key, String logMessage) {
+        clientLastActiveTime.remove(client);
+        if (key != null) key.cancel();
         try {
             System.out.println(logMessage);
-            clientLastActiveTime.remove(client);
             client.close();
-            if (key != null) {
-                key.cancel();
-            }
         } catch (IOException e) {
             System.out.println("⚠️ Error closing client: " + e.getMessage());
         }
@@ -261,16 +287,21 @@ public class Server {
     }
 
     private long parseContentLength(String[] lines) {
+        long length = 0;
+        boolean found = false;
         for (String line : lines) {
             if (line.toLowerCase().startsWith("content-length:")) {
+                String value = line.substring(15).trim();
+                if (found || !value.matches("[0-9]+")) return -1;
+                found = true;
                 try {
-                    return Long.parseLong(line.substring(15).trim());
+                    length = Long.parseLong(value);
                 } catch (NumberFormatException e) {
-                    return 0;
+                    return -1;
                 }
             }
         }
-        return 0;
+        return length;
     }
 
     private void sendFile(SocketChannel client, SelectionKey key, String filePathStr) {
@@ -308,18 +339,20 @@ public class Server {
                     message;
 
             client.write(ByteBuffer.wrap(httpResponse.getBytes()));
-            closeClient(client, key, "📤 Sent response: " + statusCode);
         } catch (Exception e) {
             System.out.println("⚠️ Error sending response: " + e.getMessage());
+        } finally {
+            closeClient(client, key, "📤 Finished response: " + statusCode);
         }
     }
 
     private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
         try {
             errorHandler.sendError(client, key, statusCode);
-            closeClient(client, key, "❌ Sent error response: " + statusCode);
         } catch (Exception e) {
             System.out.println("⚠️ Error sending error response: " + e.getMessage());
+        } finally {
+            closeClient(client, key, "❌ Finished error response: " + statusCode);
         }
     }
 }

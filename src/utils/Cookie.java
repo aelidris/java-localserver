@@ -5,7 +5,7 @@ public class Cookie {
     
     // Parse Cookie header string (e.g. "session_id=12345; user=Ahmed") into a Map
     public static Map<String, String> parseCookies(String cookieHeader) {
-        Map<String, String> cookies = new HashMap<>();
+        Map<String, String> cookies = new HashMap<>();      
         if (cookieHeader == null || cookieHeader.isEmpty()) {
             return cookies;
         }
