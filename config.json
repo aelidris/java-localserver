@@ -22,7 +22,8 @@
             ],
             "root": "./public",
             "default_file": "index.html",
-            "directory_listing": false
+            "directory_listing": false,
+            "cgi": {".py": "python3"}
         },
         "/uploads": {
             "accepted_methods": [
@@ -31,7 +32,8 @@
                 "DELETE"
             ],
             "root": "./uploads",
-            "directory_listing": true
+            "directory_listing": true,
+            "cgi": {}
         }
     }
 }

@@ -180,9 +180,7 @@
         }
 
         function checkCookies() {
-            const box = document.getElementById('cgi-result');
-            box.style.display = 'block';
-            box.innerText = `🍪 Current Browser Cookies:\n` + (document.cookie || "No cookies set yet.");
+            testCGI('GET'); // The server reports the session; HttpOnly cookies stay hidden from JavaScript.
         }
 
         async function testUploadAndDelete() {

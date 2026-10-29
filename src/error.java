@@ -23,8 +23,7 @@ public class error {
             try {
                 Path filePath = Paths.get(errorPagePath);
                 if (Files.exists(filePath) && Files.isRegularFile(filePath)) {
-                    return new HttpResponseWriter(statusCode, statusMessage, "text/html; charset=UTF-8",
-                            Files.readAllBytes(filePath));
+                    return HttpResponseWriter.file(statusCode, statusMessage, "text/html; charset=UTF-8", filePath);
                 }
             } catch (IOException | InvalidPathException e) {
                 System.out.println("⚠️ Could not read error page file: " + e.getMessage());
@@ -48,6 +47,8 @@ public class error {
                 return "Method Not Allowed";
             case 413:
                 return "Payload Too Large";
+            case 417:
+                return "Expectation Failed";
             case 500:
                 return "Internal Server Error";
             case 501:

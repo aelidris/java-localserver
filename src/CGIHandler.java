@@ -7,12 +7,11 @@ public class CGIHandler {
     private static final long TIMEOUT_NANOS = 5_000_000_000L;
     private static final int MAX_OUTPUT = 16 * 1024 * 1024;
 
-    public static Job start(String scriptPath, byte[] body, Map<String, String> environment) throws IOException {
+    public static Job start(String interpreter, String scriptPath, byte[] body, Map<String, String> environment) throws IOException {
         Path script = Path.of(scriptPath).toRealPath();
         Job job = new Job(Files.createTempDirectory("localserver-cgi-"));
         try {
             Files.write(job.input, body);
-            String interpreter = script.toString().endsWith(".py") ? "python3" : "perl";
             ProcessBuilder builder = new ProcessBuilder(interpreter, script.toString());
             builder.directory(script.getParent().toFile());
             builder.environment().putAll(environment);

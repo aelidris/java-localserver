@@ -107,6 +107,27 @@ public class ConfigLoaderTest {
             try { new ConfigLoader(file.toString()).load(); throw new AssertionError("Accepted invalid UTF-8"); }
             catch (ConfigLoader.ConfigException expected) { check(true); }
             rejected(" ".repeat(1048577));
+
+            for (String invalid : List.of("{\"servers\":[]}", "{\"servers\":null}",
+                    "{\"servers\":[{\"ports\":[0]}]}", "{\"servers\":[{}],\"host\":\"127.0.0.1\"}",
+                    "{\"default_server\":\"true\"}", "{\"request_timeout_ms\":0}",
+                    "{\"server_names\":[\"bad name\"]}", "{\"server_names\":[\"a.test\",\"A.TEST\"]}",
+                    "{\"routes\":{\"/\":{\"cgi\":{\"py\":\"python3\"}}}}",
+                    "{\"routes\":{\"/\":{\"cgi\":{\".py\":null}}}}")) rejected(invalid);
+            ConfigLoader multiple = load("""
+                {"servers":[
+                  {"ports":[9000],"server_names":["a.test"]},
+                  {"ports":[9000],"server_names":["b.test"],"default_server":true},
+                  {"ports":[0]},
+                  {"ports":[9000],"server_names":["a.test"]},
+                  {"ports":[9000],"server_names":["c.test"],"default_server":true}
+                ]}
+                """);
+            check(multiple.getServers().size() == 2);
+            check(multiple.getServers().get(1).isDefaultServer());
+            check(multiple.getServers().get(1).getServerNames().equals(List.of("b.test")));
+            ConfigLoader cgi = load("{\"routes\":{\"/\":{\"cgi\":{\".cgi\":\"python3\"}}}}");
+            check(cgi.getRouteConfig("/").cgi.equals(Map.of(".cgi", "python3")));
             Files.delete(file);
             try { new ConfigLoader(file.toString()).load(); throw new AssertionError("Accepted missing file"); }
             catch (ConfigLoader.ConfigException expected) { check(true); }

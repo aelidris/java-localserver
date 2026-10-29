@@ -5,396 +5,294 @@ import java.nio.channels.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.HashMap;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.time.ZonedDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 
 public class Server {
-    private final ConfigLoader configLoader;
-    private final Router router;
-    private final error errorHandler;
-    private Selector selector;
-
-    // Map to track last activity time for each client connection (for timeout
-    // handling)
-    private final Map<SocketChannel, Long> clientLastActiveTime = new HashMap<>();
-    private static final long TIMEOUT_MS = 60000; // 60 seconds timeout
-    private final Map<SelectionKey, CGIHandler.Job> cgiJobs = new HashMap<>();
+    private static final int MAX_CLIENTS = 256;
     private static final int MAX_CGI_JOBS = 16;
+    // Leave heap space for parser copies, sessions and the JVM itself.
+    private static final long BUFFER_LIMIT = Math.min(32 * 1024 * 1024L, Runtime.getRuntime().maxMemory() / 8);
+    private static final DateTimeFormatter HTTP_DATE =
+            DateTimeFormatter.ofPattern("EEE, dd MMM uuuu HH:mm:ss 'GMT'", Locale.US);
+    private final ConfigLoader config;
+    private final Map<SocketChannel, Client> clients = new HashMap<>();
+    private final ByteBuffer readBuffer = ByteBuffer.allocate(4096);
+    private Selector selector;
+    private int runningCgi;
 
-    public Server(ConfigLoader configLoader) {
-        this.configLoader = configLoader;
-        this.router = new Router(configLoader);
-        this.errorHandler = new error(configLoader);
+    private static class Client {
+        final SelectionKey key;
+        final long started = System.nanoTime();
+        long active = started;
+        ConfigLoader config;
+        HttpRequestReader request;
+        HttpResponseWriter response;
+        ByteBuffer interim;
+        CGIHandler.Job cgi;
+        String sessionId;
+
+        Client(SelectionKey key, List<ConfigLoader> sites) {
+            this.key = key;
+            config = sites.stream().filter(ConfigLoader::isDefaultServer).findFirst().orElse(sites.get(0));
+            request = new HttpRequestReader(config.getMaxBodySize(), host -> {
+                for (ConfigLoader site : sites) {
+                    if (site.getServerNames().contains(host)) { config = site; break; }
+                }
+                return config.getMaxBodySize();
+            });
+        }
     }
+
+    public Server(ConfigLoader config) { this.config = config; }
 
     public void start() throws IOException {
         try {
-            runServer();
-        } finally {
-            cgiJobs.values().forEach(CGIHandler.Job::close);
-            cgiJobs.clear();
-            if (selector != null) {
-                for (SelectionKey key : selector.keys()) {
-                    try { key.channel().close(); } catch (IOException ignored) { }
+            selector = Selector.open();
+            listen();
+            while (true) {
+                selector.select(runningCgi == 0 ? 100 : 25);
+                Iterator<SelectionKey> ready = selector.selectedKeys().iterator();
+                while (ready.hasNext()) {
+                    SelectionKey key = ready.next();
+                    ready.remove();
+                    if (!key.isValid()) continue;
+                    try {
+                        if (key.isAcceptable()) accept(key);
+                        else if (key.isReadable()) read((Client) key.attachment());
+                        else if (key.isWritable()) write((Client) key.attachment());
+                    } catch (IOException | RuntimeException e) {
+                        if (key.attachment() instanceof Client client) close(client);
+                        else System.err.println("Accept failed: " + e.getMessage());
+                    }
                 }
+                maintainClients();
+            }
+        } finally {
+            for (Client client : new ArrayList<>(clients.values())) close(client);
+            if (selector != null) {
+                for (SelectionKey key : selector.keys()) key.channel().close();
                 selector.close();
             }
-            clientLastActiveTime.clear();
         }
     }
 
-    private void runServer() throws IOException {
-        selector = Selector.open();
-        String host = configLoader.getHost();
-        List<Integer> ports = configLoader.getPorts();
-
-        for (int port : ports) {
-            ServerSocketChannel serverChannel = ServerSocketChannel.open();
+    private void listen() throws IOException {
+        Map<InetSocketAddress, List<ConfigLoader>> bindings = new LinkedHashMap<>();
+        for (ConfigLoader site : config.getServers()) {
+            for (int port : site.getPorts()) {
+                InetSocketAddress address = new InetSocketAddress(site.getHost(), port);
+                bindings.computeIfAbsent(address, ignored -> new ArrayList<>()).add(site);
+            }
+        }
+        int listening = 0;
+        for (var binding : bindings.entrySet()) {
+            ServerSocketChannel socket = ServerSocketChannel.open();
             try {
-                serverChannel.configureBlocking(false);
-                serverChannel.bind(new InetSocketAddress(host, port));
-                serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+                socket.configureBlocking(false);
+                socket.bind(binding.getKey());
+                socket.register(selector, SelectionKey.OP_ACCEPT, binding.getValue());
+                listening++;
+                System.out.println("Listening on " + binding.getKey());
             } catch (IOException | RuntimeException e) {
-                serverChannel.close();
-                throw e;
+                socket.close();
+                System.err.println("Skipping listener " + binding.getKey() + ": " + e.getMessage());
             }
-            System.out.println("🚀 Server listening on " + host + ":" + port);
         }
-
-        System.out.println("⚡ Single-thread NIO Event Loop started with 60s Timeout.");
-
-        while (true) {
-            // Check running scripts frequently, without waiting for socket activity.
-            selector.select(cgiJobs.isEmpty() ? 1000 : 50);
-
-            // Check and close inactive connections
-            checkTimeouts();
-
-            Set<SelectionKey> selectedKeys = selector.selectedKeys();
-            Iterator<SelectionKey> iterator = selectedKeys.iterator();
-
-            while (iterator.hasNext()) {
-                SelectionKey key = iterator.next();
-                iterator.remove();
-
-                if (!key.isValid())
-                    continue;
-
-                try {
-                    if (key.isAcceptable()) {
-                        acceptConnection(key);
-                    } else if (key.isReadable()) {
-                        readData(key);
-                    } else if (key.isWritable()) {
-                        writeData(key);
-                    }
-                } catch (IOException | RuntimeException e) {
-                    System.err.println("Connection error: " + e.getMessage());
-                    if (key.channel() instanceof SocketChannel client) {
-                        if (e instanceof IOException || key.attachment() instanceof HttpResponseWriter) {
-                            closeClient(client, key, "Client connection failed.");
-                        } else {
-                            sendError(client, key, 500);
-                        }
-                    }
-                }
-            }
-            pollCgiJobs();
-        }
+        if (listening == 0) throw new IOException("No available listening port");
     }
 
-    private void acceptConnection(SelectionKey key) throws IOException {
-        ServerSocketChannel server = (ServerSocketChannel) key.channel();
-        SocketChannel client = server.accept();
-        if (client == null) return;
-
+    @SuppressWarnings("unchecked")
+    private void accept(SelectionKey key) throws IOException {
+        SocketChannel socket = ((ServerSocketChannel) key.channel()).accept();
+        if (socket == null) return;
         try {
-            client.configureBlocking(false);
-            client.register(selector, SelectionKey.OP_READ,
-                    new HttpRequestReader(configLoader.getMaxBodySize()));
+            if (clients.size() >= MAX_CLIENTS) { socket.close(); return; }
+            socket.configureBlocking(false);
+            SelectionKey clientKey = socket.register(selector, SelectionKey.OP_READ);
+            Client client = new Client(clientKey, (List<ConfigLoader>) key.attachment());
+            clientKey.attach(client);
+            clients.put(socket, client);
         } catch (IOException | RuntimeException e) {
-            client.close();
+            socket.close();
             throw e;
         }
-
-        // Record connection time
-        clientLastActiveTime.put(client, System.currentTimeMillis());
-        System.out.println("🔗 Accepted new connection from: " + client.getRemoteAddress());
     }
 
-    private String parseHeaderValue(String[] lines, String headerName) {
-        for (String line : lines) {
-            if (line.toLowerCase().startsWith(headerName.toLowerCase())) {
-                return line.substring(headerName.length()).trim();
+    private void read(Client client) throws IOException {
+        if (bufferedBytes() + readBuffer.capacity() > BUFFER_LIMIT) { sendError(client, 503); return; }
+        readBuffer.clear();
+        int count = ((SocketChannel) client.key.channel()).read(readBuffer);
+        if (count == -1) {
+            if (client.cgi != null) client.key.interestOps(0); // Half-close still permits a response.
+            else if (client.request.hasData()) sendError(client, 400);
+            else close(client);
+            return;
+        }
+        if (count == 0) return;
+        client.active = System.nanoTime();
+        if (client.cgi != null) return;
+        readBuffer.flip();
+        try {
+            if (client.request.read(readBuffer)) handle(client);
+            else if (client.request.takeContinue()) {
+                client.interim = ByteBuffer.wrap("HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                client.key.interestOps(SelectionKey.OP_WRITE);
             }
+        } catch (HttpRequestReader.RequestException e) {
+            sendError(client, e.status);
+        } catch (java.nio.file.AccessDeniedException e) {
+            sendError(client, 403);
+        } catch (java.nio.file.NoSuchFileException e) {
+            sendError(client, 404);
+        } catch (IOException e) {
+            sendError(client, 500);
+        } catch (RuntimeException e) {
+            sendError(client, 500);
+        }
+    }
+
+    private static String header(String[] lines, String name) {
+        for (int i = 1; i < lines.length; i++) {
+            int colon = lines[i].indexOf(':');
+            if (lines[i].substring(0, colon).equalsIgnoreCase(name)) return lines[i].substring(colon + 1).trim();
         }
         return null;
     }
 
-    private void readData(SelectionKey key) throws IOException {
-        SocketChannel client = (SocketChannel) key.channel();
-        if (cgiJobs.containsKey(key)) {
-            // Detect a reset, but allow a client that half-closes its request to receive the response.
-            if (client.read(ByteBuffer.allocate(1024)) == -1) key.interestOps(0);
-            return;
-        }
-        HttpRequestReader request = (HttpRequestReader) key.attachment();
-
-        ByteBuffer buffer = ByteBuffer.allocate(4096);
-        int bytesRead = client.read(buffer);
-
-        if (bytesRead == -1) {
-            if (request.hasData()) sendError(client, key, 400);
-            else closeClient(client, key, "🔌 Client disconnected.");
-            return;
-        }
-        if (bytesRead == 0) return;
-        clientLastActiveTime.put(client, System.currentTimeMillis());
-
-        buffer.flip();
-        try {
-            if (!request.read(buffer)) return; // Wait for the next readable event.
-        } catch (HttpRequestReader.RequestException e) {
-            sendError(client, key, e.status);
-            return;
-        }
-        handleRequest(client, key, request);
-    }
-
-    private void handleRequest(SocketChannel client, SelectionKey key, HttpRequestReader request) {
+    private void handle(Client client) throws IOException {
+        HttpRequestReader request = client.request;
         String[] lines = request.getHeaderLines();
-        if (lines.length == 0) {
-            sendError(client, key, 400);
-            return;
-        }
-
-        String[] requestLineParts = lines[0].split(" ", -1);
-        if (requestLineParts.length != 3 || requestLineParts[0].isEmpty()
-                || !requestLineParts[2].equals("HTTP/1.1")) {
-            sendError(client, key, 400);
-            return;
-        }
-
-        String method = requestLineParts[0];
-        String uri = requestLineParts[1];
-        if (!uri.startsWith("/") || uri.contains("#")
-                || uri.chars().anyMatch(c -> c <= 32 || c == 127)) {
-            sendError(client, key, 400);
-            return;
-        }
-
-        System.out.println("📥 " + method + " " + uri);
-        String cookieHeader = parseHeaderValue(lines, "Cookie:");
-
-        // Route the request via Router
-        Router.RequestResult result = router.route(method, uri);
-
-        // Handle routing status results
+        String[] first = lines[0].split(" ");
+        String method = first[0], uri = first[1];
+        String cookie = header(lines, "Cookie");
+        client.sessionId = Session.resolve(cookie, client.config);
+        Router.RequestResult result = new Router(client.config).route(method, uri);
         switch (result.status) {
-            case OK:
-                if (method.equals("DELETE")) {
-                    sendResponse(client, key, 200, "File deleted successfully.");
-                } else if (method.equals("POST")) {
-                    try {
-                        Path filePath = Paths.get(result.filePath);
-
-                        if (filePath.getParent() != null) {
-                            Files.createDirectories(filePath.getParent());
-                        }
-
-                        Files.write(filePath, request.getBody());
-
-                        sendResponse(client, key, 201, "File uploaded successfully.");
-                    } catch (IOException e) {
-                        sendError(client, key, 500);
-                    }
+            case OK -> {
+                Path path = Path.of(result.filePath);
+                if (method.equals("POST")) {
+                    Files.createDirectories(path.getParent());
+                    Files.write(path, request.getBody());
+                    queue(client, text(201, "Created", "File uploaded successfully."));
+                } else if (method.equals("DELETE")) {
+                    queue(client, text(200, "OK", "File deleted successfully."));
                 } else if (result.isDirectory) {
-                    sendDirectory(client, key, result);
+                    queue(client, new HttpResponseWriter(200, "OK", "text/html; charset=UTF-8",
+                            DirectoryListing.create(path, result.directoryUrlPath)));
                 } else {
-                    sendFile(client, key, result.filePath);
+                    queue(client, HttpResponseWriter.file(200, "OK", MimeTypes.forPath(result.filePath), path));
                 }
-                break;
-            case CGI:
+            }
+            case CGI -> {
+                if (runningCgi >= MAX_CGI_JOBS) { sendError(client, 503); return; }
+                int query = uri.indexOf('?');
+                Map<String, String> env = new HashMap<>();
+                env.put("REQUEST_METHOD", method);
+                env.put("QUERY_STRING", query < 0 ? "" : uri.substring(query + 1));
+                env.put("REQUEST_URI", uri);
+                env.put("SESSION_ID", client.sessionId);
+                env.put("SESSION_VISITS", Session.getSession(client.sessionId).get("visits").toString());
+                String type = header(lines, "Content-Type");
+                if (type != null) env.put("CONTENT_TYPE", type);
+                if (cookie != null) env.put("HTTP_COOKIE", cookie);
                 try {
-                    if (cgiJobs.size() >= MAX_CGI_JOBS) {
-                        sendError(client, key, 503);
-                        break;
-                    }
-                    int queryStart = uri.indexOf('?');
-                    String queryString = queryStart < 0 ? "" : uri.substring(queryStart + 1);
-
-                    Map<String, String> env = new HashMap<>();
-                    env.put("REQUEST_METHOD", method);
-                    env.put("QUERY_STRING", queryString);
-                    env.put("REQUEST_URI", uri);
-                    String contentType = parseHeaderValue(lines, "Content-Type:");
-                    if (contentType != null) env.put("CONTENT_TYPE", contentType);
-                    if (cookieHeader != null) {
-                        env.put("HTTP_COOKIE", cookieHeader);
-                    }
-
-                    CGIHandler.Job job = CGIHandler.start(result.filePath, request.getBody(), env);
-                    cgiJobs.put(key, job);
-                    key.attach(job); // Release the accumulated request body.
-                } catch (Exception e) {
-                    sendError(client, key, 500);
-                }
-                break;
-            case REDIRECT:
-                queueResponse(key, HttpResponseWriter.redirect(result.redirect.status(), result.redirect.location()));
-                break;
-            case BAD_REQUEST:
-                sendError(client, key, 400);
-                break;
-            case METHOD_NOT_ALLOWED:
-                sendError(client, key, 405);
-                break;
-            case FORBIDDEN:
-                sendError(client, key, 403);
-                break;
-            case NOT_FOUND:
-                sendError(client, key, 404);
-                break;
-            case PAYLOAD_TOO_LARGE:
-                sendError(client, key, 413);
-                break;
-            case INTERNAL_SERVER_ERROR:
-            default:
-                sendError(client, key, 500);
-                break;
+                    client.cgi = CGIHandler.start(result.interpreter, result.filePath, request.getBody(), env);
+                    runningCgi++;
+                    client.request = null;
+                } catch (IOException | RuntimeException e) { sendError(client, 500); }
+            }
+            case REDIRECT -> queue(client, HttpResponseWriter.redirect(result.redirect.status(), result.redirect.location()));
+            case METHOD_NOT_ALLOWED -> queue(client, new error(client.config).createResponse(405)
+                    .addHeader("Allow", result.allowedMethods));
+            case BAD_REQUEST -> sendError(client, 400);
+            case FORBIDDEN -> sendError(client, 403);
+            case NOT_FOUND -> sendError(client, 404);
+            case PAYLOAD_TOO_LARGE -> sendError(client, 413);
+            default -> sendError(client, 500);
         }
     }
 
-    private void checkTimeouts() {
-        long currentTime = System.currentTimeMillis();
-        Iterator<Map.Entry<SocketChannel, Long>> iterator = clientLastActiveTime.entrySet().iterator();
+    private static HttpResponseWriter text(int status, String reason, String message) {
+        return new HttpResponseWriter(status, reason, "text/plain; charset=UTF-8", message.getBytes(StandardCharsets.UTF_8));
+    }
 
-        while (iterator.hasNext()) {
-            Map.Entry<SocketChannel, Long> entry = iterator.next();
-            SocketChannel client = entry.getKey();
-            long lastActive = entry.getValue();
+    private long bufferedBytes() {
+        long bytes = 0;
+        for (Client client : clients.values()) {
+            if (client.request != null) bytes += client.request.bodySize();
+            if (client.response != null) bytes += client.response.bufferedBytes();
+        }
+        return bytes;
+    }
 
-            if (currentTime - lastActive > TIMEOUT_MS) {
+    private void queue(Client client, HttpResponseWriter response) {
+        client.request = null;
+        if (bufferedBytes() + response.bufferedBytes() > BUFFER_LIMIT) {
+            response.close();
+            response = text(503, "Service Unavailable", "Server buffer limit reached.");
+        }
+        response.addHeader("Date", HTTP_DATE.format(ZonedDateTime.now(ZoneOffset.UTC)));
+        if (client.sessionId != null) {
+            response.addHeader("Set-Cookie", "SESSION_ID=" + client.sessionId + "; Path=/; HttpOnly; SameSite=Lax; Max-Age="
+                    + Session.MAX_AGE_SECONDS);
+        }
+        client.response = response;
+        client.key.interestOps(SelectionKey.OP_WRITE);
+    }
+
+    private void sendError(Client client, int status) {
+        cancelCgi(client);
+        try { queue(client, new error(client.config).createResponse(status)); }
+        catch (RuntimeException e) { close(client); }
+    }
+
+    private void write(Client client) throws IOException {
+        if (client.interim != null) {
+            if (((SocketChannel) client.key.channel()).write(client.interim) > 0) client.active = System.nanoTime();
+            if (!client.interim.hasRemaining()) {
+                client.interim = null;
+                client.key.interestOps(SelectionKey.OP_READ);
+            }
+            return;
+        }
+        if (client.response.writeTo((SocketChannel) client.key.channel()) > 0) client.active = System.nanoTime();
+        if (client.response.isComplete()) close(client);
+    }
+
+    private void maintainClients() {
+        long now = System.nanoTime();
+        for (Client client : new ArrayList<>(clients.values())) {
+            long timeout = client.config.getRequestTimeoutMs() * 1_000_000L;
+            // An absolute deadline prevents a slow trickle from holding a request forever.
+            if (now - client.active >= timeout || (client.request != null && now - client.started >= timeout)) {
+                close(client);
+            } else if (client.cgi != null) {
                 try {
-                    System.out.println(
-                            "⏰ Connection timeout reached. Closing inactive client: " + client.getRemoteAddress());
-                } catch (IOException e) {
-                    System.out.println("⏰ Connection timeout reached. Closing inactive client.");
-                }
-
-                try {
-                    SelectionKey key = client.keyFor(selector);
-                    if (key != null) {
-                        cancelCgi(key);
-                        key.attach(null);
-                        key.cancel();
-                    }
-                    client.close();
-                } catch (IOException ignored) {
-                }
-
-                iterator.remove();
+                    HttpResponseWriter response = client.cgi.poll();
+                    if (response != null) { cancelCgi(client); queue(client, response); }
+                } catch (IOException | RuntimeException e) { sendError(client, 500); }
             }
         }
+        Session.expire();
     }
 
-    private void closeClient(SocketChannel client, SelectionKey key, String logMessage) {
-        clientLastActiveTime.remove(client);
-        if (key != null) {
-            cancelCgi(key);
-            key.attach(null);
-            key.cancel();
-        }
-        try {
-            System.out.println(logMessage);
-            client.close();
-        } catch (IOException e) {
-            System.out.println("⚠️ Error closing client: " + e.getMessage());
+    private void cancelCgi(Client client) {
+        if (client.cgi != null) {
+            client.cgi.close();
+            client.cgi = null;
+            runningCgi--;
         }
     }
 
-    private void sendDirectory(SocketChannel client, SelectionKey key, Router.RequestResult result) {
-        try {
-            byte[] html = DirectoryListing.create(Path.of(result.filePath), result.directoryUrlPath);
-            queueResponse(key, new HttpResponseWriter(200, "OK", "text/html; charset=UTF-8", html));
-        } catch (java.nio.file.AccessDeniedException e) {
-            sendError(client, key, 403);
-        } catch (java.nio.file.NoSuchFileException e) {
-            sendError(client, key, 404);
-        } catch (IOException e) {
-            sendError(client, key, 500);
-        }
-    }
-
-    private void sendFile(SocketChannel client, SelectionKey key, String filePathStr) {
-        try {
-            Path filePath = Paths.get(filePathStr);
-            if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
-                queueResponse(key, new HttpResponseWriter(200, "OK", "text/html; charset=UTF-8",
-                        Files.readAllBytes(filePath)));
-            } else {
-                sendError(client, key, 404);
-            }
-        } catch (IOException e) {
-            sendError(client, key, 500);
-        }
-    }
-
-    private void sendResponse(SocketChannel client, SelectionKey key, int statusCode, String message) {
-        queueResponse(key, new HttpResponseWriter(statusCode, statusCode == 201 ? "Created" : "OK",
-                "text/plain; charset=UTF-8", message.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
-        cancelCgi(key);
-        try {
-            queueResponse(key, errorHandler.createResponse(statusCode));
-        } catch (Exception e) {
-            closeClient(client, key, "Could not prepare error response: " + e.getMessage());
-        }
-    }
-
-    private void queueResponse(SelectionKey key, HttpResponseWriter response) {
-        key.attach(response);
-        key.interestOps(SelectionKey.OP_WRITE);
-    }
-
-    private void pollCgiJobs() {
-        for (SelectionKey key : new ArrayList<>(cgiJobs.keySet())) {
-            SocketChannel client = (SocketChannel) key.channel();
-            if (!key.isValid()) {
-                closeClient(client, key, "CGI client disconnected.");
-                continue;
-            }
-            try {
-                HttpResponseWriter response = cgiJobs.get(key).poll();
-                if (response != null) {
-                    cancelCgi(key);
-                    queueResponse(key, response);
-                }
-            } catch (IOException | RuntimeException e) {
-                System.err.println("CGI failed: " + e.getMessage());
-                sendError(client, key, 500);
-            }
-        }
-    }
-
-    private void cancelCgi(SelectionKey key) {
-        CGIHandler.Job job = cgiJobs.remove(key);
-        if (job != null) job.close();
-    }
-
-    private void writeData(SelectionKey key) throws IOException {
-        SocketChannel client = (SocketChannel) key.channel();
-        HttpResponseWriter response = (HttpResponseWriter) key.attachment();
-        if (response.writeTo(client) > 0) {
-            clientLastActiveTime.put(client, System.currentTimeMillis());
-        }
-        if (response.isComplete()) closeClient(client, key, "📤 Response sent completely.");
+    private void close(Client client) {
+        clients.remove((SocketChannel) client.key.channel());
+        cancelCgi(client);
+        if (client.response != null) client.response.close();
+        client.key.cancel();
+        client.key.attach(null);
+        try { client.key.channel().close(); } catch (IOException ignored) { }
     }
 }

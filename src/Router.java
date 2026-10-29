@@ -22,6 +22,8 @@ public class Router {
         public boolean isDirectory;
         public String directoryUrlPath;
         public ConfigLoader.RedirectConfig redirect;
+        public String interpreter;
+        public String allowedMethods;
 
         public RequestResult(RouteStatus status, String filePath, boolean isDirectory) {
             this.status = status;
@@ -47,7 +49,11 @@ public class Router {
 
         String routePath = findRoute(path);
         ConfigLoader.RouteConfig config = configLoader.getRouteConfig(routePath);
-        if (!config.acceptedMethods.contains(method)) return error(RouteStatus.METHOD_NOT_ALLOWED);
+        if (!config.acceptedMethods.contains(method)) {
+            RequestResult result = error(RouteStatus.METHOD_NOT_ALLOWED);
+            result.allowedMethods = String.join(", ", config.acceptedMethods);
+            return result;
+        }
         if (config.redirect != null) {
             RequestResult result = new RequestResult(RouteStatus.REDIRECT, null, false);
             result.redirect = config.redirect;
@@ -76,11 +82,14 @@ public class Router {
                 }
             }
 
-            // CGI still uses .py for now, but must obey the route's allowed methods.
-            if (target.toString().endsWith(".py")) {
-                return Files.isRegularFile(target)
-                        ? new RequestResult(RouteStatus.CGI, target.toString(), false)
-                        : error(RouteStatus.NOT_FOUND);
+            String name = target.getFileName().toString();
+            int dot = name.lastIndexOf('.');
+            String interpreter = config.cgi.get(dot < 0 ? "" : name.substring(dot));
+            if (interpreter != null) {
+                if (!Files.isRegularFile(target)) return error(RouteStatus.NOT_FOUND);
+                RequestResult result = new RequestResult(RouteStatus.CGI, target.toString(), false);
+                result.interpreter = interpreter;
+                return result;
             }
             if (method.equals("POST")) {
                 if ((!fileRoot && relative.isEmpty()) || Files.isDirectory(target)) return error(RouteStatus.FORBIDDEN);

@@ -1,0 +1,25 @@
+{
+  "servers": [
+    {
+      "host": "127.0.0.1",
+      "ports": [8080, 8081],
+      "server_names": ["localhost", "test.com"],
+      "default_server": true,
+      "client_max_body_size": 1048576,
+      "request_timeout_ms": 60000,
+      "error_pages": {"404": "error_pages/404.html"},
+      "routes": {
+        "/": {"root": "./public", "accepted_methods": ["GET"], "cgi": {".py": "python3"}},
+        "/uploads": {"root": "./uploads", "accepted_methods": ["GET", "POST", "DELETE"], "cgi": {}}
+      }
+    },
+    {
+      "host": "127.0.0.1",
+      "ports": [8080],
+      "server_names": ["other.com"],
+      "routes": {
+        "/": {"root": "./public/empty.html", "accepted_methods": ["GET"], "cgi": {}}
+      }
+    }
+  ]
+}

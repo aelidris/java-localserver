@@ -10,4 +10,4 @@ echo "📦 Compiling Java source files..."
 javac -d out src/*.java src/utils/*.java
 
 echo "🚀 Compiling complete. Starting Server (Main)..."
-java -cp out Main
+java -cp out Main "$@"

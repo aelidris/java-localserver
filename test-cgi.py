@@ -137,7 +137,8 @@ sys.stdout.write("x" * (17 * 1024 * 1024) if mode == "limit" else "done")
                                + str(len(payload)).encode() + b"\r\n\r\n" + payload)
                 status, headers, body = receive(client)
                 check(status == 201 and body == payload, "CGI binary response changed")
-                check(headers.count(b"Set-Cookie:") == 2, "Repeated cookies lost")
+                check(headers.count(b"Set-Cookie:") == 3 and b"Set-Cookie: a=1\r\n" in headers
+                      and b"Set-Cookie: b=2\r\n" in headers, "Repeated CGI/session cookies lost")
                 check(b"\r\nStatus:" not in headers, "CGI Status leaked as a header")
             clean()
             with connect() as client:

@@ -1,20 +1,30 @@
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.net.URI;
+import java.util.Locale;
+import java.util.function.ToLongFunction;
 
 // One reader per connection: collect headers, then a fixed-length or chunked body.
 public class HttpRequestReader {
     private static final int MAX_HEADERS = 16 * 1024;
-    private final long maxBodySize;
+    private long maxBodySize;
+    private final ToLongFunction<String> selectHost;
     private final ByteArrayOutputStream headers = new ByteArrayOutputStream();
     private final ByteArrayOutputStream body = new ByteArrayOutputStream();
     private String[] lines;
     private int lastFourBytes;
     private int contentLength;
     private ChunkedBodyReader chunkedBody;
+    private boolean continuePending;
 
     public HttpRequestReader(long maxBodySize) {
+        this(maxBodySize, null);
+    }
+
+    public HttpRequestReader(long maxBodySize, ToLongFunction<String> selectHost) {
         this.maxBodySize = Math.min(maxBodySize, Integer.MAX_VALUE - 8L);
+        this.selectHost = selectHost;
     }
 
     public boolean read(ByteBuffer input) throws RequestException {
@@ -37,8 +47,15 @@ public class HttpRequestReader {
 
     private void parseHeaders() throws RequestException {
         lines = headers.toString(StandardCharsets.ISO_8859_1).split("\r\n");
+        String[] first = lines[0].split(" ", -1);
+        if (first.length != 3 || !first[0].matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+                || !first[1].startsWith("/") || first[1].contains("#")
+                || first[1].chars().anyMatch(c -> c <= 32 || c == 127)
+                || !first[2].equals("HTTP/1.1")) throw new RequestException(400);
         boolean hasLength = false;
         String transferEncoding = null;
+        String expectation = null;
+        String host = null;
         long length = 0;
 
         for (int i = 1; i < lines.length; i++) {
@@ -62,7 +79,17 @@ public class HttpRequestReader {
             if (name.equalsIgnoreCase("Transfer-Encoding")) {
                 transferEncoding = transferEncoding == null ? value : transferEncoding + "," + value;
             }
+            if (name.equalsIgnoreCase("Host")) {
+                if (host != null) throw new RequestException(400);
+                host = hostName(value);
+            }
+            if (name.equalsIgnoreCase("Expect")) {
+                expectation = expectation == null ? value : expectation + "," + value;
+            }
         }
+
+        if (host == null) throw new RequestException(400);
+        if (selectHost != null) maxBodySize = selectHost.applyAsLong(host);
 
         if (transferEncoding != null) {
             if (hasLength) throw new RequestException(400);
@@ -79,10 +106,37 @@ public class HttpRequestReader {
         }
         if (length > maxBodySize) throw new RequestException(413);
         contentLength = (int) length;
+        if (expectation != null) {
+            if (!expectation.equalsIgnoreCase("100-continue")) throw new RequestException(417);
+            continuePending = true;
+        }
     }
 
     public boolean hasData() {
         return headers.size() > 0;
+    }
+
+    public int bodySize() { return body.size(); }
+
+    public boolean takeContinue() {
+        if (lines == null || !continuePending) return false;
+        continuePending = false;
+        return true;
+    }
+
+    private static String hostName(String value) throws RequestException {
+        try {
+            URI uri = URI.create("http://" + value);
+            if (uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawQuery() != null
+                    || uri.getRawFragment() != null || !uri.getRawPath().isEmpty()
+                    || value.endsWith(":") || uri.getPort() > 65535 || uri.getPort() == 0) {
+                throw new IllegalArgumentException();
+            }
+            String host = uri.getHost().toLowerCase(Locale.ROOT);
+            return host.endsWith(".") ? host.substring(0, host.length() - 1) : host;
+        } catch (IllegalArgumentException e) {
+            throw new RequestException(400);
+        }
     }
 
     public String[] getHeaderLines() {

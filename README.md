@@ -1,211 +1,181 @@
-# Java NIO Local HTTP Server (`java-localserver`)
+# Java NIO HTTP Server
 
-A high-performance, lightweight, single-threaded, non-blocking HTTP/1.1 server built from scratch in **Java using Java NIO**. Designed to handle event-driven network I/O, robust routing, CGI script execution (Python/Perl), file uploads and deletions, cookie/session management, and comprehensive HTTP error handling.
+A small HTTP server using Java Core, one application thread and one NIO `Selector`.
+It handles GET, POST and DELETE, static files, Python CGI, uploads, cookies and sessions.
+No server framework or asynchronous runtime is used.
 
----
+## Run
 
-## 🚀 Key Features
-
-- **Non-Blocking Java NIO Architecture:** Uses `Selector`, `ServerSocketChannel`, and `SocketChannel` for efficient event-driven multiplexing on a single thread.
-- **CGI Script Support:** Executes `.py` and `.pl` scripts through `ProcessBuilder`, supporting `GET` requests (query strings and environment variables) and `POST` requests (stdin body streaming), with binary- and text-safe output buffering.
-- **HTTP/1.1 Method Support:** Supports `GET` (static files and CGI), `POST` (data uploads and CGI input), and `DELETE` (file removal workflows).
-- **Session & Cookie Management:** Parses incoming `Cookie` headers and passes them to CGI/server routines, enabling stateful tracking and session persistence.
-- **Connection Timeout Management:** Automatically cleans up and closes inactive client connections after a configurable timeout (60 seconds).
-- **Security & Path Traversal Protection:** Prevents unauthorized path traversal attacks and safeguards root files from accidental overwrites.
-- **Robust Error Handling:** Supports configurable custom error responses for HTTP status codes, including `400 Bad Request`, `403 Forbidden`, `404 Not Found`, `405 Method Not Allowed`, `413 Payload Too Large`, and `500 Internal Server Error`.
-- **Interactive Web Dashboard:** Includes a web interface (`public/index.html`) for testing status codes, CGI scripts, file operations, and cookies in real time.
-
----
-
-## 🛠️ Project Architecture
-
-```text
-java-localserver/
-├── public/                 # Web root: HTML, static assets, and CGI scripts
-│   ├── index.html          # Interactive testing dashboard
-│   └── test.py             # Python CGI test handler
-├── src/                    # Java source code
-│   ├── utils               # Cookie and session utilities
-│   │   ├── Coockie.java
-│   │   └── Session.java 
-│   ├── Server.java         # Main NIO event loop, connection handling, and routing
-│   ├── Router.java         # URL path resolution, security validation, and method filtering
-│   ├── CGIHandler.java     # CGI subprocess management and environment/stdin/stdout piping
-│   ├── ConfigLoader.java   # JSON configuration parser
-│   ├── error.java          # HTTP error response generator
-│   └── Main.java           # Server entry point
-├── config.json             # Server configuration
-├── run.sh                  # Build and execution helper script
-└── README.md               # Project documentation
-```
-
-### Core Components
-
-- **`Server.java`:** Drives the main event loop using a Java NIO `Selector`. Handles accept/read events, manages keep-alive connections and timeouts, parses headers, and dispatches requests.
-- **`Router.java`:** Normalizes URIs, checks supported HTTP methods, enforces security boundaries to prevent directory traversal and root-file tampering, and identifies CGI scripts.
-- **`CGIHandler.java`:** Manages external script execution using `ProcessBuilder`. Configures CGI environment variables such as `REQUEST_METHOD`, `QUERY_STRING`, `CONTENT_LENGTH`, and `HTTP_COOKIE`. Streams POST data to the process's standard input and captures output through `ByteArrayOutputStream`.
-- **`ConfigLoader.java`:** Loads server bindings, host addresses, maximum request body sizes, and error-page mappings from `config.json`.
-
----
-
-## ⚙️ Configuration
-
-The `config.json` file defines the host, ports, document root, and maximum request body size.
-
-Example configuration:
-
-```json
-{
-  "host": "127.0.0.1",
-  "ports": [8080, 8081],
-  "client_max_body_size": 1048576,
-  "error_pages": {"404": "error_pages/404.html"},
-  "routes": {
-    "/": {
-      "root": "./public",
-      "default_file": "index.html",
-      "accepted_methods": ["GET"],
-      "directory_listing": false
-    },
-    "/uploads": {
-      "root": "./uploads",
-      "accepted_methods": ["GET", "POST", "DELETE"],
-      "directory_listing": false
-    }
-  }
-}
-```
-
-Configuration is parsed as UTF-8 JSON using Java Core, with a 1 MiB file limit.
-Invalid JSON, duplicate or unknown settings, incorrect types, duplicate ports,
-and out-of-range values stop startup with a clear error and exit code 1.
-Ports must be between 1 and 65535; the body limit is between 0 and 2147483639 bytes.
-Paths are relative to the working directory used to start the server. Missing custom
-error pages use the built-in error response.
-
-Routes can use custom prefixes such as `/images` or `/api/files`.
-The longest matching path prefix wins at a segment boundary: `/images/icons`
-takes precedence over `/images`, while `/images-old` does not match `/images`.
-A trailing slash in a configured prefix is removed; duplicate normalized prefixes
-and paths containing `.` or `..` segments, repeated slashes, queries or fragments are rejected.
-
-If `routes` is provided, it must contain `/`. Omitted route methods default to GET;
-the default file is `index.html`, and directory listing defaults to false.
-When the default file is absent, `directory_listing: true` returns an HTML listing;
-`false` returns 403. An existing default file always takes priority.
-CGI mappings and multiple server configurations are later steps.
-
-For example, add this entry inside `routes` to serve `/images/logo.png` from
-`./public/images/logo.png`:
-
-```json
-"/images": {
-  "root": "./public/images",
-  "accepted_methods": ["GET"],
-  "default_file": "index.html",
-  "directory_listing": false
-}
-```
-
-Each route applies its allowed methods, including to CGI requests. POST uploads
-and DELETE work on custom routes when explicitly enabled. Existing file roots
-serve only the exact route path; directory roots use the remaining URL path.
-GET checks the configured default file inside each requested directory.
-Path checks reject traversal and symlinks leading outside the selected root.
-
-To redirect a route, add a `redirect` object:
-
-```json
-"/old": {
-  "accepted_methods": ["GET"],
-  "redirect": {"status": 301, "location": "/new"}
-}
-```
-
-Supported statuses are 301, 302 (the default), 303, 307 and 308. The location must
-be a path starting with a single `/` or an absolute HTTP(S) URL. Spaces, control
-characters and malformed URIs are rejected at startup; Unicode is percent-encoded.
-The configured location is used as-is for the whole route, without appending the
-original path suffix or query. Methods are checked first; an allowed redirect
-returns an empty body and a `Location` header without accessing the route's files.
-Use `bash test-redirects.sh` to test configuration, routing and partial writes for redirects.
-
-To enable directory browsing, set `"directory_listing": true` on the desired route.
-Listings show directories first, then files, sorted by name. Links use encoded UTF-8
-paths, so spaces, Arabic text and characters such as `+`, `%`, `?` and `#` work.
-Names are escaped for HTML; symlinks, special files, control characters and backslashes
-are omitted. Empty directories return an empty list. `/folder` and `/folder/` both
-use links starting from `/`, so links work with either URL.
-
-Directory scans are limited to 10,000 entries and HTML output to 2 MiB; exceeding
-either limit returns 500. `bash test-listing.sh` checks listing output, URL decoding,
-path boundaries and these limits. HTTP tests also follow generated links.
-
-Run `bash test-config.sh` for configuration checks, `bash test-routing.sh` for
-routing checks, and `python3 test-resilience.py` for HTTP tests, including custom
-and nested routes, roots, default files, uploads and deletes.
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- Java Development Kit (JDK) 21 or higher
-- Apache Maven, if required by your build setup
-- Python 3, for running Python CGI tests
-
-### Compilation and Execution
-
-Make the provided shell script executable:
-
-```bash
-chmod +x run.sh
-```
-
-Run the server:
+Requires JDK 21+ and Python 3 for CGI. No Maven or external Java dependencies.
 
 ```bash
 ./run.sh
+# Or use the example with two websites sharing a port:
+./run.sh config-multi.json
 ```
 
-Alternatively, compile and run manually if your project does not require additional dependencies:
+Manual compilation:
 
 ```bash
 mkdir -p out
-javac -d out src/*.java
-java -cp out Main
+javac -d out src/*.java src/utils/*.java
+java -cp out Main config.json
 ```
 
-Once the server has started, open your browser and navigate to:
+Open http://localhost:8080. The test page exercises CGI, sessions and upload/delete.
 
-**http://localhost:8080**
+## Configuration
 
----
+The existing single-server format in `config.json` remains supported. To configure
+independent websites, put their configurations in a top-level `servers` array:
 
-## 🧪 Testing and Audit Workflows
+```json
+{
+  "servers": [
+    {
+      "host": "127.0.0.1",
+      "ports": [8080, 8081],
+      "server_names": ["test.com", "localhost"],
+      "default_server": true,
+      "client_max_body_size": 1048576,
+      "request_timeout_ms": 60000,
+      "error_pages": {"404": "error_pages/404.html"},
+      "routes": {
+        "/": {
+          "root": "./public",
+          "default_file": "index.html",
+          "accepted_methods": ["GET", "POST"],
+          "directory_listing": false,
+          "cgi": {".py": "python3"}
+        },
+        "/uploads": {
+          "root": "./uploads",
+          "accepted_methods": ["GET", "POST", "DELETE"],
+          "directory_listing": true,
+          "cgi": {}
+        }
+      }
+    },
+    {
+      "host": "127.0.0.1",
+      "ports": [8080],
+      "server_names": ["other.com"],
+      "routes": {"/": {"root": "./public/empty.html", "cgi": {}}}
+    }
+  ]
+}
+```
 
-The built-in web dashboard provides interactive tests for the server's main features.
+- `host` is the listening address; `server_names` are names matched against the
+  request's `Host` header, ignoring case, a trailing dot and the optional port.
+- Virtual hosts on the same listening address/port share one socket. An unknown
+  hostname selects `default_server`, or the first valid server if none is explicit.
+- Each server has its own routes, body limit, error pages and sessions.
+- Duplicate ports inside a server, overlapping server names and multiple explicit
+  defaults on one binding are configuration errors. Shared ports with distinct
+  names are supported.
+- In a `servers` array, invalid/conflicting entries are reported and skipped.
+  A port that cannot bind is also skipped; other listeners continue. Startup fails
+  when no valid configuration or listening socket remains. Invalid top-level JSON
+  or unknown top-level settings fail startup.
+- Defaults: host `127.0.0.1`, ports `[8080]`, body limit 1 MiB and timeout 60 seconds.
+  Ports range from 1 to 65535; timeout ranges from 100 to 3600000 milliseconds.
+- Paths are relative to the process working directory. Configuration is UTF-8 JSON,
+  limited to 1 MiB. Missing custom error files fall back to built-in error pages.
 
-- **HTTP Status Responses:** Test `200 OK`, `400 Bad Request`, `403 Forbidden`, `404 Not Found`, `405 Method Not Allowed`, `413 Payload Too Large`, and `500 Internal Server Error`.
-- **CGI Testing (GET and POST):** Execute `public/test.py` dynamically and verify environment variables, query-string parameters, and standard-input streaming.
-- **Cookies and Sessions:** Verify `Set-Cookie` persistence and the `SESSION_ID` value returned by backend CGI scripts.
-- **File Upload and Deletion:** Test file creation through POST uploads and resource cleanup through DELETE requests.
+Try the virtual hosts with:
 
----
+```bash
+curl --resolve test.com:8080:127.0.0.1 http://test.com:8080/
+curl --resolve other.com:8080:127.0.0.1 http://other.com:8080/
+```
 
-### ⚖️ Testing Payload Limits (413 Payload Too Large)
+## Routes and HTTP
 
-To verify that the server correctly enforces maximum body size limitations (configured in `config.json`), you can generate a test file larger than the threshold (e.g., a 2MB file when the limit is set to 1MB) and upload it using `curl` with `--data-binary`:
+The longest matching route prefix wins at a path-segment boundary. For example,
+`/images/logo.png` maps to `logo.png` inside the root configured for `/images`.
+A file root serves the exact route path. A directory root appends the remaining path.
+Traversal and symlinks leading outside the route root are rejected.
 
-**Generate a test file (> 1MB)**:
+Every routes object must include `/`. Defaults are GET, `./public`, `index.html`,
+listing disabled, and Python CGI mapped by `.py`. Set `"cgi": {}` to disable CGI
+on a route. Uploads send raw bytes with POST to the desired filename:
 
-  ```bash
-   dd if=/dev/zero of=uploads/bigfile.txt bs=1M count=2
-  ```
+```bash
+curl --data-binary @my-file.png http://localhost:8080/uploads/my-file.png
+curl http://localhost:8080/uploads/my-file.png -o downloaded.png
+curl -X DELETE http://localhost:8080/uploads/my-file.png
+```
 
-  ```bash 
-   curl -X POST http://localhost:8080/uploads/bigfile.txt \
-     --data-binary "@uploads/bigfile.txt" \
-     -H "Content-Type: application/octet-stream"    
-  ```
+Fixed-length and chunked bodies are supported. The selected virtual host's body
+limit is checked before accepting an oversized body. `Expect: 100-continue` is
+supported; other expectations receive 417. Invalid/missing/duplicate `Host` headers
+receive 400. Disallowed methods receive 405 with `Allow`.
+
+Static files have MIME types and Content-Length. Responses include Date and
+Connection: close. The server handles one request per connection. Built-in error
+pages cover 400, 403, 404, 405, 413 and 500.
+
+An existing `default_file` takes priority over directory listings. Listings escape
+HTML and encode links; scans are limited to 10,000 entries and output to 2 MiB.
+
+Redirect example inside `routes`:
+
+```json
+"/old": {"redirect": {"status": 301, "location": "/new"}}
+```
+
+Supported statuses: 301, 302 (default), 303, 307 and 308. Locations must be local
+absolute paths or HTTP(S) URLs. The location is used as configured, without appending
+the original suffix or query. Route method permissions still apply.
+
+## CGI and sessions
+
+`cgi` maps extensions to interpreter executables. ProcessBuilder receives the
+interpreter and absolute script filename as separate arguments, without a shell.
+The script's directory is its working directory. Environment includes REQUEST_METHOD,
+QUERY_STRING, REQUEST_URI, CONTENT_TYPE, CONTENT_LENGTH, HTTP_COOKIE, PATH_INFO and
+SCRIPT_FILENAME. PATH_INFO and SCRIPT_FILENAME contain the full script path.
+
+CGI input/output use temporary files so process pipes cannot block the event loop.
+Jobs are polled, limited to 16 concurrent scripts, 5 seconds and 16 MiB output per job.
+Failures return 500; exhausted CGI capacity returns 503. Temporary files and running
+children are cleaned up when jobs finish, fail, time out or clients reset.
+
+The server creates random SESSION_ID cookies and stores per-session data, including
+a visit counter. CGI receives SESSION_ID and SESSION_VISITS; `public/test.py` shows
+persistence across requests. Session cookies use HttpOnly, SameSite=Lax, Path=/ and
+a 30-minute maximum age. Sessions expire after 30 minutes of inactivity, are isolated
+per virtual server, and the store evicts the least recently used entry at 10,000 sessions.
+
+## Resource handling
+
+Socket reads and writes happen only after readiness events, with at most one socket
+read or write per client per select cycle. Partial writes keep their position.
+Static files and custom error pages stream in 64 KiB buffers instead of loading the
+whole file. Regular filesystem operations still run synchronously on the event thread.
+
+There is a 256-client cap and a shared buffer budget of the smaller of 32 MiB or
+one eighth of the maximum heap. Buffer pressure receives 503; connections beyond
+the client cap are closed. Parser/body copies require additional temporary heap.
+Both idle connections and requests exceeding the absolute request deadline are closed,
+so sending a slow trickle cannot keep an unfinished request alive indefinitely.
+
+## Tests
+
+```bash
+bash test.sh                 # All Java and localhost integration tests
+python3 test-browser.py      # Optional: needs Firefox and geckodriver
+python3 test-stress.py       # Needs Siege and jcmd (included with the JDK)
+```
+
+Use `SIEGE=/path/to/siege python3 test-stress.py` when Siege is not on PATH.
+Tests create temporary configurations, isolated web roots and local servers; they
+clean them up on completion. The stress test runs three 10-second rounds with
+25 concurrent Siege clients, requires at least 99.5% availability and successful
+HTTP 200 transactions, and checks post-GC heap stability and descriptor recovery.
+
+Verified locally: all functional suites passed, Firefox loaded external CSS/JS and
+preserved sessions, and all three Siege rounds achieved 100% availability. An 80 MiB
+file streamed correctly with a 32 MiB JVM heap. Short stress runs are evidence for
+these conditions, not a guarantee against every possible workload or memory leak.

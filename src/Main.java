@@ -2,7 +2,7 @@ public class Main {
     public static void main(String[] args) {
         try {
             // Load configuration from config.json
-            ConfigLoader config = new ConfigLoader("config.json");
+            ConfigLoader config = new ConfigLoader(args.length == 0 ? "config.json" : args[0]);
             config.load();
 
             // Pass the config instance directly to Server

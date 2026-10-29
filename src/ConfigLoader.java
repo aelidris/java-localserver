@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -20,12 +21,18 @@ public class ConfigLoader {
     private Map<Integer, String> errorPages = Map.of();
     private Map<String, RouteConfig> routes = Map.of("/", new RouteConfig());
 
+    private List<ConfigLoader> servers = List.of();
+    private List<String> serverNames = List.of();
+    private boolean defaultServer;
+    private long requestTimeoutMs = 60000;
+
     public static class RouteConfig {
         public List<String> acceptedMethods = List.of("GET");
         public String root = "./public";
         public String defaultFile = "index.html";
         public boolean directoryListing = false;
         public RedirectConfig redirect;
+        public Map<String, String> cgi = Map.of(".py", "python3");
     }
 
     public record RedirectConfig(int status, String location) { }
@@ -42,45 +49,93 @@ public class ConfigLoader {
             if (bytes.length > 1048576) throw invalid("Config exceeds 1 MiB");
             String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
             Map<String, Object> config = object(JsonParser.parse(text), "config");
-            keys(config, "host", "ports", "client_max_body_size", "error_pages", "routes");
-
-            String newHost = string(config.getOrDefault("host", "127.0.0.1"), "host");
-            InetAddress.getByName(newHost);
-            List<Integer> newPorts = new ArrayList<>();
-            for (Object value : array(config.getOrDefault("ports", List.of(new BigDecimal(8080))), "ports")) {
-                int port = (int) integer(value, "port", 1, 65535);
-                if (newPorts.contains(port)) throw invalid("Duplicate port: " + port);
-                newPorts.add(port);
+            if (!config.containsKey("servers")) {
+                parseServer(config);
+                servers = List.of(this);
+                return;
             }
-            if (newPorts.isEmpty()) throw invalid("ports must not be empty");
-            long newMaxBodySize = integer(config.getOrDefault("client_max_body_size", new BigDecimal(1048576)),
-                    "client_max_body_size", 0, Integer.MAX_VALUE - 8L);
-
-            Map<Integer, String> newErrors = new HashMap<>();
-            for (var entry : object(config.getOrDefault("error_pages", Map.of()), "error_pages").entrySet()) {
-                if (!entry.getKey().matches("[45][0-9]{2}")) throw invalid("Invalid error status: " + entry.getKey());
-                newErrors.put(Integer.parseInt(entry.getKey()), path(entry.getValue(), "error page"));
+            keys(config, "servers");
+            List<ConfigLoader> valid = new ArrayList<>();
+            int index = 0;
+            for (Object entry : array(config.get("servers"), "servers")) {
+                index++;
+                try {
+                    ConfigLoader server = new ConfigLoader(configPath);
+                    server.parseServer(object(entry, "server"));
+                    for (ConfigLoader other : valid) {
+                        if (!server.host.equals(other.host)
+                                || server.ports.stream().noneMatch(other.ports::contains)) continue;
+                        if ((server.defaultServer && other.defaultServer)
+                                || (server.serverNames.isEmpty() && other.serverNames.isEmpty())
+                                || server.serverNames.stream().anyMatch(other.serverNames::contains)) {
+                            throw invalid("Conflicting server names/defaults on shared ports");
+                        }
+                    }
+                    valid.add(server);
+                } catch (IOException | IllegalArgumentException e) {
+                    System.err.println("Skipping server " + index + ": " + e.getMessage());
+                }
             }
-
-            Map<String, RouteConfig> newRoutes = new HashMap<>();
-            Map<String, Object> routeValues = object(config.getOrDefault("routes", Map.of("/", Map.of())), "routes");
-            for (var entry : routeValues.entrySet()) {
-                String name = routePath(entry.getKey());
-                if (newRoutes.containsKey(name)) throw invalid("Duplicate route: " + name);
-                newRoutes.put(name, route(name, object(entry.getValue(), "route " + name)));
-            }
-            if (!newRoutes.containsKey("/")) throw invalid("routes must include /");
-
-            // Publish only after the entire configuration has passed validation.
-            host = newHost;
-            ports = List.copyOf(newPorts);
-            maxBodySize = newMaxBodySize;
-            errorPages = Map.copyOf(newErrors);
-            routes = Map.copyOf(newRoutes);
-            System.out.println("Configuration loaded: " + host + " " + ports);
+            if (valid.isEmpty()) throw invalid("No valid server configuration");
+            servers = List.copyOf(valid);
         } catch (IOException | IllegalArgumentException e) {
             throw new ConfigException("Invalid config " + configPath + ": " + e.getMessage());
         }
+    }
+
+    private void parseServer(Map<String, Object> config) throws IOException {
+        keys(config, "host", "ports", "client_max_body_size", "error_pages", "routes",
+                "server_names", "default_server", "request_timeout_ms");
+
+        String newHost = string(config.getOrDefault("host", "127.0.0.1"), "host");
+        newHost = InetAddress.getByName(newHost).getHostAddress();
+        List<Integer> newPorts = new ArrayList<>();
+        for (Object value : array(config.getOrDefault("ports", List.of(new BigDecimal(8080))), "ports")) {
+            int port = (int) integer(value, "port", 1, 65535);
+            if (newPorts.contains(port)) throw invalid("Duplicate port: " + port);
+            newPorts.add(port);
+        }
+        if (newPorts.isEmpty()) throw invalid("ports must not be empty");
+        long newMaxBodySize = integer(config.getOrDefault("client_max_body_size", new BigDecimal(1048576)),
+                "client_max_body_size", 0, Integer.MAX_VALUE - 8L);
+
+        Map<Integer, String> newErrors = new HashMap<>();
+        for (var entry : object(config.getOrDefault("error_pages", Map.of()), "error_pages").entrySet()) {
+            if (!entry.getKey().matches("[45][0-9]{2}")) throw invalid("Invalid error status: " + entry.getKey());
+            newErrors.put(Integer.parseInt(entry.getKey()), path(entry.getValue(), "error page"));
+        }
+
+        Map<String, RouteConfig> newRoutes = new HashMap<>();
+        Map<String, Object> routeValues = object(config.getOrDefault("routes", Map.of("/", Map.of())), "routes");
+        for (var entry : routeValues.entrySet()) {
+            String name = routePath(entry.getKey());
+            if (newRoutes.containsKey(name)) throw invalid("Duplicate route: " + name);
+            newRoutes.put(name, route(name, object(entry.getValue(), "route " + name)));
+        }
+        if (!newRoutes.containsKey("/")) throw invalid("routes must include /");
+
+        List<String> newNames = new ArrayList<>();
+        for (Object value : array(config.getOrDefault("server_names", List.of()), "server_names")) {
+            String name = string(value, "server name").toLowerCase(Locale.ROOT);
+            if (!name.matches("[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?") || name.contains("..")
+                    || newNames.contains(name)) throw invalid("Invalid or duplicate server name: " + name);
+            newNames.add(name);
+        }
+        Object newDefault = config.getOrDefault("default_server", false);
+        if (!(newDefault instanceof Boolean)) throw invalid("default_server must be true or false");
+        long newTimeout = integer(config.getOrDefault("request_timeout_ms", new BigDecimal(60000)),
+                "request_timeout_ms", 100, 3600000);
+
+        // Publish only after the entire configuration has passed validation.
+        serverNames = List.copyOf(newNames);
+        defaultServer = (boolean) newDefault;
+        requestTimeoutMs = newTimeout;
+        host = newHost;
+        ports = List.copyOf(newPorts);
+        maxBodySize = newMaxBodySize;
+        errorPages = Map.copyOf(newErrors);
+        routes = Map.copyOf(newRoutes);
+        System.out.println("Configuration loaded: " + host + " " + ports);
     }
 
     private String routePath(String name) {
@@ -96,7 +151,7 @@ public class ConfigLoader {
     }
 
     private RouteConfig route(String name, Map<String, Object> values) {
-        keys(values, "accepted_methods", "root", "default_file", "directory_listing", "redirect");
+        keys(values, "accepted_methods", "root", "default_file", "directory_listing", "redirect", "cgi");
         RouteConfig route = new RouteConfig();
         List<String> methods = new ArrayList<>();
         for (Object value : array(values.getOrDefault("accepted_methods", List.of("GET")), name + " methods")) {
@@ -118,6 +173,14 @@ public class ConfigLoader {
         if (!(listing instanceof Boolean)) throw invalid("directory_listing must be true or false: " + name);
         route.directoryListing = (boolean) listing;
         if (values.containsKey("redirect")) route.redirect = redirect(object(values.get("redirect"), name + " redirect"));
+        if (values.containsKey("cgi")) {
+            Map<String, String> mappings = new HashMap<>();
+            for (var entry : object(values.get("cgi"), name + " cgi").entrySet()) {
+                if (!entry.getKey().matches("\\.[A-Za-z0-9]+")) throw invalid("Invalid CGI extension");
+                mappings.put(entry.getKey(), path(entry.getValue(), "CGI interpreter"));
+            }
+            route.cgi = Map.copyOf(mappings);
+        }
         return route;
     }
 
@@ -173,6 +236,11 @@ public class ConfigLoader {
     }
 
     private IllegalArgumentException invalid(String message) { return new IllegalArgumentException(message); }
+
+    public List<ConfigLoader> getServers() { return servers.isEmpty() ? List.of(this) : servers; }
+    public List<String> getServerNames() { return serverNames; }
+    public boolean isDefaultServer() { return defaultServer; }
+    public long getRequestTimeoutMs() { return requestTimeoutMs; }
 
     public String getHost() { return host; }
     public List<Integer> getPorts() { return ports; }
