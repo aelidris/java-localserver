@@ -1,163 +1,158 @@
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.net.InetAddress;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class ConfigLoader {
     private final String configPath;
     private String host = "127.0.0.1";
-    private List<Integer> ports = new ArrayList<>();
+    private List<Integer> ports = List.of(8080);
     private long maxBodySize = 1048576;
-    private Map<Integer, String> errorPages = new HashMap<>();
-    private Map<String, RouteConfig> routes = new HashMap<>();
+    private Map<Integer, String> errorPages = Map.of();
+    private Map<String, RouteConfig> routes = Map.of("/", new RouteConfig());
 
     public static class RouteConfig {
-        public List<String> acceptedMethods = new ArrayList<>();
+        public List<String> acceptedMethods = List.of("GET");
         public String root = "./public";
         public String defaultFile = "index.html";
         public boolean directoryListing = false;
     }
 
-    public ConfigLoader(String configPath) {
-        this.configPath = configPath;
-        ports.add(8080);
-    }
+    public ConfigLoader(String configPath) { this.configPath = configPath; }
 
     public void load() {
         try {
-            List<String> lines = Files.readAllLines(Paths.get(configPath));
-            String content = String.join("", lines);
+            // Bound the input before decoding or parsing it.
+            byte[] bytes;
+            try (var input = Files.newInputStream(Path.of(configPath))) {
+                bytes = input.readNBytes(1048577);
+            }
+            if (bytes.length > 1048576) throw invalid("Config exceeds 1 MiB");
+            String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+            Map<String, Object> config = object(JsonParser.parse(text), "config");
+            keys(config, "host", "ports", "client_max_body_size", "error_pages", "routes");
 
-            // Parse Host
-            if (content.contains("\"host\"")) {
-                int start = content.indexOf("\"host\"") + 7;
-                int firstQuote = content.indexOf("\"", start);
-                int secondQuote = content.indexOf("\"", firstQuote + 1);
-                this.host = content.substring(firstQuote + 1, secondQuote);
+            String newHost = string(config.getOrDefault("host", "127.0.0.1"), "host");
+            InetAddress.getByName(newHost);
+            List<Integer> newPorts = new ArrayList<>();
+            for (Object value : array(config.getOrDefault("ports", List.of(new BigDecimal(8080))), "ports")) {
+                int port = (int) integer(value, "port", 1, 65535);
+                if (newPorts.contains(port)) throw invalid("Duplicate port: " + port);
+                newPorts.add(port);
+            }
+            if (newPorts.isEmpty()) throw invalid("ports must not be empty");
+            long newMaxBodySize = integer(config.getOrDefault("client_max_body_size", new BigDecimal(1048576)),
+                    "client_max_body_size", 0, Integer.MAX_VALUE - 8L);
+
+            Map<Integer, String> newErrors = new HashMap<>();
+            for (var entry : object(config.getOrDefault("error_pages", Map.of()), "error_pages").entrySet()) {
+                if (!entry.getKey().matches("[45][0-9]{2}")) throw invalid("Invalid error status: " + entry.getKey());
+                newErrors.put(Integer.parseInt(entry.getKey()), path(entry.getValue(), "error page"));
             }
 
-            // Parse Ports
-            if (content.contains("\"ports\"")) {
-                int portsIndex = content.indexOf("\"ports\"");
-                int bracketStart = content.indexOf("[", portsIndex);
-                int bracketEnd = content.indexOf("]", bracketStart);
-                String portsStr = content.substring(bracketStart + 1, bracketEnd).trim();
-
-                if (!portsStr.isEmpty()) {
-                    ports.clear();
-                    String[] portArray = portsStr.split(",");
-                    for (String p : portArray) {
-                        ports.add(Integer.parseInt(p.trim()));
-                    }
+            Map<String, RouteConfig> newRoutes = new HashMap<>();
+            Map<String, Object> routeValues = object(config.getOrDefault("routes", Map.of("/", Map.of())), "routes");
+            for (var entry : routeValues.entrySet()) {
+                // Router currently handles these two routes. More routes come next.
+                if (!Set.of("/", "/uploads").contains(entry.getKey())) {
+                    throw invalid("Unsupported route: " + entry.getKey() + " (currently / and /uploads)");
                 }
+                newRoutes.put(entry.getKey(), route(entry.getKey(), object(entry.getValue(), "route " + entry.getKey())));
             }
+            if (!newRoutes.containsKey("/")) throw invalid("routes must include /");
 
-            // Parse Max Body Size
-            if (content.contains("\"client_max_body_size\"")) {
-                int sizeIndex = content.indexOf("\"client_max_body_size\"");
-                int colonIndex = content.indexOf(":", sizeIndex);
-                int commaIndex = content.indexOf(",", colonIndex);
-                if (commaIndex == -1 || commaIndex > content.indexOf("}", colonIndex)) {
-                    commaIndex = content.indexOf("}", colonIndex);
-                }
-                String sizeStr = content.substring(colonIndex + 1, commaIndex).trim();
-                this.maxBodySize = Long.parseLong(sizeStr);
-            }
-
-            // Parse Error Pages
-            if (content.contains("\"error_pages\"")) {
-                int epIndex = content.indexOf("\"error_pages\"");
-                int objStart = content.indexOf("{", epIndex);
-                int objEnd = content.indexOf("}", objStart);
-                String epSub = content.substring(objStart + 1, objEnd);
-                String[] pairs = epSub.split(",");
-                for (String pair : pairs) {
-                    String[] keyValue = pair.split(":");
-                    if (keyValue.length == 2) {
-                        String codeStr = keyValue[0].replace("\"", "").trim();
-                        String pathStr = keyValue[1].replace("\"", "").trim();
-                        try {
-                            int code = Integer.parseInt(codeStr);
-                            errorPages.put(code, pathStr);
-                        } catch (NumberFormatException ignored) {
-                        }
-                    }
-                }
-            }
-
-            // Parse Routes (/ and /uploads)
-            if (content.contains("\"routes\"")) {
-                // Parse Root Route "/"
-                RouteConfig defaultRoute = new RouteConfig();
-                if (content.contains("\"/\"")) {
-                    int rootIndex = content.indexOf("\"/\"");
-                    int amIndex = content.indexOf("\"accepted_methods\"", rootIndex);
-                    if (amIndex != -1) {
-                        int bracketStart = content.indexOf("[", amIndex);
-                        int bracketEnd = content.indexOf("]", bracketStart);
-                        String methodsStr = content.substring(bracketStart + 1, bracketEnd);
-                        String[] methods = methodsStr.split(",");
-                        defaultRoute.acceptedMethods.clear();
-                        for (String m : methods) {
-                            defaultRoute.acceptedMethods.add(m.replace("\"", "").trim());
-                        }
-                    }
-                }
-                routes.put("/", defaultRoute);
-
-                // Parse Uploads Route "/uploads"
-                if (content.contains("\"/uploads\"")) {
-                    RouteConfig uploadsRoute = new RouteConfig();
-                    uploadsRoute.root = "./uploads"; // Explicit root for uploads
-                    uploadsRoute.directoryListing = true;
-
-                    int uploadsIndex = content.indexOf("\"/uploads\"");
-                    int amIndex = content.indexOf("\"accepted_methods\"", uploadsIndex);
-                    if (amIndex != -1) {
-                        int bracketStart = content.indexOf("[", amIndex);
-                        int bracketEnd = content.indexOf("]", bracketStart);
-                        String methodsStr = content.substring(bracketStart + 1, bracketEnd);
-                        String[] methods = methodsStr.split(",");
-                        uploadsRoute.acceptedMethods.clear();
-                        for (String m : methods) {
-                            uploadsRoute.acceptedMethods.add(m.replace("\"", "").trim());
-                        }
-                    }
-                    routes.put("/uploads", uploadsRoute);
-                }
-            }
-
-            System.out.println("⚙️ Configuration loaded successfully from " + configPath);
-            System.out.println("   -> Host: " + this.host);
-            System.out.println("   -> Ports: " + this.ports);
-            System.out.println("   -> Max Body Size: " + this.maxBodySize + " bytes");
-            System.out.println("   -> Error Pages Loaded: " + this.errorPages.keySet());
-
-        } catch (IOException e) {
-            System.out.println("⚠️ Could not read config file, using default values. Error: " + e.getMessage());
+            // Publish only after the entire configuration has passed validation.
+            host = newHost;
+            ports = List.copyOf(newPorts);
+            maxBodySize = newMaxBodySize;
+            errorPages = Map.copyOf(newErrors);
+            routes = Map.copyOf(newRoutes);
+            System.out.println("Configuration loaded: " + host + " " + ports);
+        } catch (IOException | IllegalArgumentException e) {
+            throw new ConfigException("Invalid config " + configPath + ": " + e.getMessage());
         }
     }
 
-    public String getHost() {
-        return host;
+    private RouteConfig route(String name, Map<String, Object> values) {
+        keys(values, "accepted_methods", "root", "default_file", "directory_listing");
+        RouteConfig route = new RouteConfig();
+        List<String> methods = new ArrayList<>();
+        for (Object value : array(values.getOrDefault("accepted_methods", List.of("GET")), name + " methods")) {
+            String method = string(value, "method");
+            if (!Set.of("GET", "POST", "DELETE").contains(method) || methods.contains(method)) {
+                throw invalid("Invalid or duplicate method in " + name + ": " + method);
+            }
+            methods.add(method);
+        }
+        if (methods.isEmpty()) throw invalid("accepted_methods must not be empty in " + name);
+        route.acceptedMethods = List.copyOf(methods);
+        route.root = path(values.getOrDefault("root", name.equals("/uploads") ? "./uploads" : "./public"), name + " root");
+        route.defaultFile = path(values.getOrDefault("default_file", "index.html"), name + " default_file");
+        Path index = Path.of(route.defaultFile);
+        if (index.isAbsolute() || index.normalize().startsWith("..") || index.normalize().toString().isEmpty()) {
+            throw invalid("default_file must stay inside its root: " + name);
+        }
+        Object listing = values.getOrDefault("directory_listing", false);
+        if (!(listing instanceof Boolean)) throw invalid("directory_listing must be true or false: " + name);
+        route.directoryListing = (boolean) listing;
+        return route;
     }
 
-    public List<Integer> getPorts() {
-        return ports;
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> object(Object value, String name) {
+        if (!(value instanceof Map)) throw invalid(name + " must be an object");
+        return (Map<String, Object>) value;
     }
 
-    public long getMaxBodySize() {
-        return maxBodySize;
+    private List<?> array(Object value, String name) {
+        if (!(value instanceof List<?> list)) throw invalid(name + " must be an array");
+        return list;
     }
 
-    public String getErrorPagePath(int errorCode) {
-        return errorPages.get(errorCode);
+    private String string(Object value, String name) {
+        if (!(value instanceof String text) || text.isBlank()
+                || text.chars().anyMatch(c -> c < 32 || c == 127)) throw invalid(name + " must be a non-empty string without controls");
+        return text;
     }
 
-    public RouteConfig getRouteConfig(String path) {
-        return routes.get(path);
+    private String path(Object value, String name) {
+        String text = string(value, name);
+        Path.of(text);
+        return text;
+    }
+
+    private long integer(Object value, String name, long min, long max) {
+        if (!(value instanceof BigDecimal number)) throw invalid(name + " must be a number");
+        try {
+            long result = number.longValueExact();
+            if (result >= min && result <= max) return result;
+        } catch (ArithmeticException ignored) { }
+        throw invalid(name + " must be an integer between " + min + " and " + max);
+    }
+
+    private void keys(Map<String, Object> values, String... allowed) {
+        for (String key : values.keySet()) {
+            if (!Set.of(allowed).contains(key)) throw invalid("Unknown setting: " + key);
+        }
+    }
+
+    private IllegalArgumentException invalid(String message) { return new IllegalArgumentException(message); }
+
+    public String getHost() { return host; }
+    public List<Integer> getPorts() { return ports; }
+    public long getMaxBodySize() { return maxBodySize; }
+    public String getErrorPagePath(int code) { return errorPages.get(code); }
+    public RouteConfig getRouteConfig(String path) { return routes.get(path); }
+
+    public static class ConfigException extends IllegalArgumentException {
+        public ConfigException(String message) { super(message); }
     }
 }

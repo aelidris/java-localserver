@@ -200,6 +200,36 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             assert status(healthy) == 200
             print("PASS: complete 8 MiB static/error/CGI responses, concurrent requests during slow reads, reset during response.")
+
+            # Restart with different roots and an index name to verify configuration is applied.
+            server.terminate()
+            server.wait(timeout=3)
+            site = work / "configured site"
+            site.mkdir()
+            (site / "welcome.html").write_bytes(b"Configured home page")
+            (site / "images").mkdir()
+            config["routes"]["/"].update(root="./configured site", default_file="welcome.html", directory_listing=False)
+            config["routes"]["/uploads"]["root"] = "./saved files"
+            (work / "config.json").write_text(json.dumps(config))
+            server = subprocess.Popen(["java", "-cp", str(work / "classes"), "Main"],
+                                      cwd=work, stdout=log, stderr=log)
+            for attempt in range(100):
+                assert server.poll() is None, "Server failed with custom roots"
+                try:
+                    with connect():
+                        break
+                except OSError:
+                    time.sleep(0.05)
+            else:
+                raise AssertionError("Server did not restart")
+            with connect() as client:
+                client.sendall(healthy)
+                assert receive(client).endswith(b"\r\n\r\nConfigured home page")
+            assert status(b"GET /images HTTP/1.1\r\nHost: localhost\r\n\r\n") == 403
+            assert status(b"POST /uploads/config.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\ndata") == 201
+            assert (work / "saved files/config.txt").read_bytes() == b"data"
+            assert not (work / "uploads/config.txt").exists()
+            print("PASS: configured roots, default file, directory access flag and upload destination.")
         except Exception:
             log.flush()
             log.seek(0)
