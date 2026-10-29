@@ -20,6 +20,7 @@ public class Router {
         public RouteStatus status;
         public String filePath;
         public boolean isDirectory;
+        public String directoryUrlPath;
         public ConfigLoader.RedirectConfig redirect;
 
         public RequestResult(RouteStatus status, String filePath, boolean isDirectory) {
@@ -32,8 +33,14 @@ public class Router {
     public RequestResult route(String method, String uri) {
         int query = uri.indexOf('?');
         String path = query < 0 ? uri : uri.substring(0, query);
-        if (!path.startsWith("/") || path.contains("//") || path.contains("\\") || path.contains("#")
-                || path.chars().anyMatch(c -> c <= 32 || c == 127)) return error(RouteStatus.BAD_REQUEST);
+        if (path.contains("#") || path.chars().anyMatch(c -> c <= 32 || c == 127)) return error(RouteStatus.BAD_REQUEST);
+        try {
+            path = UrlPath.decode(path);
+        } catch (IllegalArgumentException e) {
+            return error(RouteStatus.BAD_REQUEST);
+        }
+        if (!path.startsWith("/") || path.contains("//") || path.contains("\\")
+                || path.chars().anyMatch(c -> c < 32 || c == 127)) return error(RouteStatus.BAD_REQUEST);
         for (String segment : path.split("/")) {
             if (segment.equals(".") || segment.equals("..")) return error(RouteStatus.FORBIDDEN);
         }
@@ -62,7 +69,11 @@ public class Router {
                 if (!insideRoot(root, index)) return error(RouteStatus.FORBIDDEN);
                 if (Files.isRegularFile(index)) target = index;
                 else if (!config.directoryListing) return error(RouteStatus.FORBIDDEN);
-                else return new RequestResult(RouteStatus.OK, target.toString(), true);
+                else {
+                    RequestResult result = new RequestResult(RouteStatus.OK, target.toString(), true);
+                    result.directoryUrlPath = path;
+                    return result;
+                }
             }
 
             // CGI still uses .py for now, but must obey the route's allowed methods.

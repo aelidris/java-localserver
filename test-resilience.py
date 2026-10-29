@@ -8,6 +8,8 @@ import struct
 import subprocess
 import tempfile
 import time
+from html.parser import HTMLParser
+from urllib.parse import quote
 
 repo = Path(__file__).resolve().parent
 with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
@@ -227,6 +229,16 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
                     "root": "./assets", "accepted_methods": ["GET", "POST", "DELETE"],
                     "redirect": {"status": code, "location": "/assets/logo.txt"}}
             config["routes"]["/old"] = {"redirect": {"location": "/assets/"}}
+            browse = work / "browse"
+            browse.mkdir()
+            names = ["plain.txt", "with space.txt", "مرحبا.txt", "a+b.txt", "100%.txt", "hash#.txt", "query?.txt", "<script>&.txt"]
+            for name in names:
+                (browse / name).write_bytes(b"Listed file\x00\xff")
+            (browse / "folder name").mkdir()
+            (browse / "folder name/nested.txt").write_bytes(b"Nested file")
+            (browse / "outside-link").symlink_to(site, target_is_directory=True)
+            config["routes"]["/browse"] = {"root": "./browse", "directory_listing": True}
+            config["routes"]["/closed"] = {"root": "./browse", "directory_listing": False}
             (work / "config.json").write_text(json.dumps(config))
             server = subprocess.Popen(["java", "-cp", str(work / "classes"), "Main"],
                                       cwd=work, stdout=log, stderr=log)
@@ -279,6 +291,44 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
                                        "--max-time", "5", f"http://127.0.0.1:{port}/old"], capture_output=True, check=True)
             assert followed.stdout == b"Assets index"
             print("PASS: redirect statuses, Location, empty body, method permissions, no file mutation and curl follow.")
+
+            def get(path):
+                with connect() as client:
+                    client.sendall(b"GET " + path.encode("ascii") + b" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    headers, body = receive(client).split(b"\r\n\r\n", 1)
+                    assert headers.startswith(b"HTTP/1.1 200 ")
+                    assert b"Content-Length: " + str(len(body)).encode() + b"\r\n" in headers + b"\r\n"
+                    return body
+
+            class Links(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.paths = []
+
+                def handle_starttag(self, tag, attrs):
+                    if tag == "a":
+                        self.paths.append(dict(attrs)["href"])
+
+            listing = get("/browse")
+            assert listing == get("/browse/")
+            assert b"&lt;script&gt;&amp;.txt" in listing and b"<script>" not in listing
+            links = Links()
+            links.feed(listing.decode("utf-8"))
+            assert links.paths[0] == "/browse/folder%20name/"
+            expected_links = {"/browse/" + quote(name) for name in names}
+            assert set(links.paths) == expected_links | {"/browse/folder%20name/"}
+            for link in expected_links:
+                assert get(link) == b"Listed file\x00\xff"
+            assert b'href="/browse/folder%20name/nested.txt"' in get(links.paths[0])
+            assert get("/browse/folder%20name/nested.txt") == b"Nested file"
+            assert status(b"GET /closed HTTP/1.1\r\nHost: localhost\r\n\r\n") == 403
+            assert status(b"GET /browse/%2e%2e/config.json HTTP/1.1\r\nHost: localhost\r\n\r\n") == 403
+            assert status(b"GET /browse/outside-link/welcome.html HTTP/1.1\r\nHost: localhost\r\n\r\n") == 403
+            assert status(b"GET /browse/%ff HTTP/1.1\r\nHost: localhost\r\n\r\n") == 400
+            (browse / "index.html").write_bytes(b"Index takes priority")
+            assert get("/browse") == b"Index takes priority"
+            assert get("/closed") == b"Index takes priority"
+            print("PASS: directory listings, working encoded links, nested directories, HTML escaping, disabled listing and index priority.")
         except Exception:
             log.flush()
             log.seek(0)

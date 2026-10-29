@@ -187,6 +187,8 @@ public class Server {
                     } catch (IOException e) {
                         sendError(client, key, 500);
                     }
+                } else if (result.isDirectory) {
+                    sendDirectory(client, key, result);
                 } else {
                     sendFile(client, key, result.filePath);
                 }
@@ -286,6 +288,19 @@ public class Server {
             client.close();
         } catch (IOException e) {
             System.out.println("⚠️ Error closing client: " + e.getMessage());
+        }
+    }
+
+    private void sendDirectory(SocketChannel client, SelectionKey key, Router.RequestResult result) {
+        try {
+            byte[] html = DirectoryListing.create(Path.of(result.filePath), result.directoryUrlPath);
+            queueResponse(key, new HttpResponseWriter(200, "OK", "text/html; charset=UTF-8", html));
+        } catch (java.nio.file.AccessDeniedException e) {
+            sendError(client, key, 403);
+        } catch (java.nio.file.NoSuchFileException e) {
+            sendError(client, key, 404);
+        } catch (IOException e) {
+            sendError(client, key, 500);
         }
     }
 
