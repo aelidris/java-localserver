@@ -170,6 +170,36 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
                 assert response.endswith(b"00ff41\n")
             assert status(healthy) == 200
             print("PASS: live chunked binary upload, trailers, incomplete/malformed/oversize rejection, CGI decoded input.")
+
+            # Keep a large response pending while another client requests a page.
+            large_body = bytes(range(256)) * 32768  # 8 MiB, larger than socket buffers.
+            (work / "public/large.bin").write_bytes(large_body)
+            (work / "error_pages/404.html").write_bytes(large_body)
+            (work / "public/large.py").write_text(
+                'import sys\nsys.stdout.write("Content-Type: text/plain\\r\\n\\r\\n" + "x" * 8388608)\n'
+            )
+            for path, expected_status, expected_body in (
+                    (b"/large.bin", 200, large_body), (b"/missing-large", 404, large_body),
+                    (b"/large.py", 200, b"x" * 8388608)):
+                with connect() as client:
+                    client.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    response = bytearray(client.recv(1))
+                    time.sleep(0.1)
+                    assert status(healthy) == 200, "A slow reader blocked other clients"
+                    while chunk := client.recv(65536):
+                        response.extend(chunk)
+                    headers, received_body = bytes(response).split(b"\r\n\r\n", 1)
+                    assert int(headers.split(b" ", 2)[1]) == expected_status
+                    assert received_body == expected_body, "Response truncated or changed: " + repr(path)
+                    if path != b"/large.py":
+                        assert b"Content-Length: 8388608" in headers
+                        assert b"Connection: close" in headers
+            with connect() as client:
+                client.sendall(b"GET /large.bin HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                assert client.recv(1)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            assert status(healthy) == 200
+            print("PASS: complete 8 MiB static/error/CGI responses, concurrent requests during slow reads, reset during response.")
         except Exception:
             log.flush()
             log.seek(0)

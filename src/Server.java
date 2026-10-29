@@ -70,11 +70,13 @@ public class Server {
                         acceptConnection(key);
                     } else if (key.isReadable()) {
                         readData(key);
+                    } else if (key.isWritable()) {
+                        writeData(key);
                     }
                 } catch (IOException | RuntimeException e) {
                     System.err.println("Connection error: " + e.getMessage());
                     if (key.channel() instanceof SocketChannel client) {
-                        if (e instanceof IOException) {
+                        if (e instanceof IOException || key.attachment() instanceof HttpResponseWriter) {
                             closeClient(client, key, "Client connection failed.");
                         } else {
                             sendError(client, key, 500);
@@ -211,8 +213,7 @@ public class Server {
                         finalResponse = "HTTP/1.1 200 OK\r\n" + cgiRawResponse;
                     }
 
-                    client.write(ByteBuffer.wrap(finalResponse.getBytes(StandardCharsets.UTF_8)));
-                    closeClient(client, key, "📤 Handled CGI request successfully.");
+                    queueResponse(key, HttpResponseWriter.raw(finalResponse.getBytes(StandardCharsets.UTF_8)));
                 } catch (Exception e) {
                     sendError(client, key, 500);
                 }
@@ -254,6 +255,11 @@ public class Server {
                 }
 
                 try {
+                    SelectionKey key = client.keyFor(selector);
+                    if (key != null) {
+                        key.attach(null);
+                        key.cancel();
+                    }
                     client.close();
                 } catch (IOException ignored) {
                 }
@@ -281,20 +287,8 @@ public class Server {
         try {
             Path filePath = Paths.get(filePathStr);
             if (Files.exists(filePath) && !Files.isDirectory(filePath)) {
-                byte[] responseBody = Files.readAllBytes(filePath);
-
-                String httpResponse = "HTTP/1.1 200 OK\r\n" +
-                        "Content-Type: text/html; charset=UTF-8\r\n" +
-                        "Content-Length: " + responseBody.length + "\r\n" +
-                        "Connection: close\r\n\r\n";
-
-                ByteBuffer buffer = ByteBuffer.allocate(httpResponse.getBytes().length + responseBody.length);
-                buffer.put(httpResponse.getBytes());
-                buffer.put(responseBody);
-                buffer.flip();
-
-                client.write(buffer);
-                closeClient(client, key, "📤 Handled request -> Status: 200 OK");
+                queueResponse(key, new HttpResponseWriter(200, "OK", "text/html; charset=UTF-8",
+                        Files.readAllBytes(filePath)));
             } else {
                 sendError(client, key, 404);
             }
@@ -304,28 +298,29 @@ public class Server {
     }
 
     private void sendResponse(SocketChannel client, SelectionKey key, int statusCode, String message) {
-        try {
-            String httpResponse = "HTTP/1.1 " + statusCode + " OK\r\n" +
-                    "Content-Type: text/plain; charset=UTF-8\r\n" +
-                    "Content-Length: " + message.getBytes().length + "\r\n" +
-                    "Connection: close\r\n\r\n" +
-                    message;
-
-            client.write(ByteBuffer.wrap(httpResponse.getBytes()));
-        } catch (Exception e) {
-            System.out.println("⚠️ Error sending response: " + e.getMessage());
-        } finally {
-            closeClient(client, key, "📤 Finished response: " + statusCode);
-        }
+        queueResponse(key, new HttpResponseWriter(statusCode, statusCode == 201 ? "Created" : "OK",
+                "text/plain; charset=UTF-8", message.getBytes(StandardCharsets.UTF_8)));
     }
 
     private void sendError(SocketChannel client, SelectionKey key, int statusCode) {
         try {
-            errorHandler.sendError(client, key, statusCode);
+            queueResponse(key, errorHandler.createResponse(statusCode));
         } catch (Exception e) {
-            System.out.println("⚠️ Error sending error response: " + e.getMessage());
-        } finally {
-            closeClient(client, key, "❌ Finished error response: " + statusCode);
+            closeClient(client, key, "Could not prepare error response: " + e.getMessage());
         }
+    }
+
+    private void queueResponse(SelectionKey key, HttpResponseWriter response) {
+        key.attach(response);
+        key.interestOps(SelectionKey.OP_WRITE);
+    }
+
+    private void writeData(SelectionKey key) throws IOException {
+        SocketChannel client = (SocketChannel) key.channel();
+        HttpResponseWriter response = (HttpResponseWriter) key.attachment();
+        if (response.writeTo(client) > 0) {
+            clientLastActiveTime.put(client, System.currentTimeMillis());
+        }
+        if (response.isComplete()) closeClient(client, key, "📤 Response sent completely.");
     }
 }
