@@ -58,10 +58,39 @@ Example configuration:
 {
   "host": "127.0.0.1",
   "ports": [8080, 8081],
-  "maxBodySize": 1048576,
-  "root": "./public"
+  "client_max_body_size": 1048576,
+  "error_pages": {"404": "error_pages/404.html"},
+  "routes": {
+    "/": {
+      "root": "./public",
+      "default_file": "index.html",
+      "accepted_methods": ["GET"],
+      "directory_listing": false
+    },
+    "/uploads": {
+      "root": "./uploads",
+      "accepted_methods": ["GET", "POST", "DELETE"],
+      "directory_listing": false
+    }
+  }
 }
 ```
+
+Configuration is parsed as UTF-8 JSON using Java Core, with a 1 MiB file limit.
+Invalid JSON, duplicate or unknown settings, incorrect types, duplicate ports,
+and out-of-range values stop startup with a clear error and exit code 1.
+Ports must be between 1 and 65535; the body limit is between 0 and 2147483639 bytes.
+Paths are relative to the working directory used to start the server. Missing custom
+error pages use the built-in error response.
+
+At this stage, only `/` and `/uploads` routes are supported; other routes are rejected.
+If `routes` is provided, it must contain `/`. Omitted route methods default to GET;
+the default file is `index.html`, and directory listing defaults to false.
+The listing flag is parsed, but generating directory listings is still pending.
+Custom routes, redirects, CGI mappings and multiple server configurations are later steps.
+
+Run `bash test-config.sh` for configuration checks and `python3 test-resilience.py`
+for HTTP tests, including custom roots and default files.
 
 ---
 
