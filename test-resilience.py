@@ -114,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
 
             prefix = b"POST /uploads/rejected HTTP/1.1\r\nHost: localhost\r\n"
             assert status(prefix + b"Content-Length: 16385\r\n\r\n") == 413
-            assert status(prefix + b"Transfer-Encoding: chunked\r\n\r\n") == 501
+            assert status(prefix + b"Transfer-Encoding: gzip, chunked\r\n\r\n") == 501
             assert status(prefix + b"Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n") == 400
             assert status(prefix + b"X-Large: " + b"a" * 17000 + b"\r\n\r\n") == 400
             assert not (work / "uploads/rejected").exists()
@@ -135,6 +135,41 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
                     assert response.endswith(b"\n\n" + payload.hex().encode() + b"\n")
             assert status(healthy) == 200
             print("PASS: fragmented headers/body, binary upload at limit, early EOF, body/header limits, CGI binary/empty input.")
+
+            chunk_header = (b"POST /uploads/chunked HTTP/1.1\r\nHost: localhost\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n")
+            with connect() as client:
+                # A complete data chunk is not the end of the request.
+                for part in (chunk_header, b"100;name=test\r", b"\n", bytes(range(256)), b"\r\n0\r\nX-Note: ignored\r\n"):
+                    client.sendall(part)
+                    client.settimeout(0.05)
+                    try:
+                        client.recv(1)
+                        raise AssertionError("Chunked request completed too early")
+                    except socket.timeout:
+                        pass
+                    assert not (work / "uploads/chunked").exists()
+                    assert status(healthy) == 200
+                client.settimeout(3)
+                client.sendall(b"\r\n")
+                assert receive(client).startswith(b"HTTP/1.1 201 ")
+            assert (work / "uploads/chunked").read_bytes() == bytes(range(256))
+            for malformed, expected in ((b"z\r\n", 400), (b"1\r\nx!", 400), (b"4001\r\n", 413)):
+                assert status(chunk_header + malformed) == expected
+                assert (work / "uploads/chunked").read_bytes() == bytes(range(256))
+            with connect() as client:
+                client.sendall(chunk_header + b"1\r\nx\r\n0\r\n")
+                client.shutdown(socket.SHUT_WR)
+                assert receive(client).startswith(b"HTTP/1.1 400 ")
+            assert (work / "uploads/chunked").read_bytes() == bytes(range(256))
+            with connect() as client:
+                client.sendall(chunk_header.replace(b"/uploads/chunked", b"/echo.py")
+                               + b"3\r\n\x00\xffA\r\n0\r\n\r\n")
+                response = receive(client)
+                assert response.startswith(b"HTTP/1.1 200 ")
+                assert response.endswith(b"00ff41\n")
+            assert status(healthy) == 200
+            print("PASS: live chunked binary upload, trailers, incomplete/malformed/oversize rejection, CGI decoded input.")
         except Exception:
             log.flush()
             log.seek(0)

@@ -2,7 +2,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
-// One reader per connection: first collect headers, then Content-Length bytes.
+// One reader per connection: collect headers, then a fixed-length or chunked body.
 public class HttpRequestReader {
     private static final int MAX_HEADERS = 16 * 1024;
     private final long maxBodySize;
@@ -11,6 +11,7 @@ public class HttpRequestReader {
     private String[] lines;
     private int lastFourBytes;
     private int contentLength;
+    private ChunkedBodyReader chunkedBody;
 
     public HttpRequestReader(long maxBodySize) {
         this.maxBodySize = Math.min(maxBodySize, Integer.MAX_VALUE - 8L);
@@ -26,6 +27,7 @@ public class HttpRequestReader {
         }
 
         if (lines == null) return false;
+        if (chunkedBody != null) return chunkedBody.read(input);
         int count = Math.min(input.remaining(), contentLength - body.size());
         byte[] chunk = new byte[count];
         input.get(chunk);
@@ -36,7 +38,7 @@ public class HttpRequestReader {
     private void parseHeaders() throws RequestException {
         lines = headers.toString(StandardCharsets.ISO_8859_1).split("\r\n");
         boolean hasLength = false;
-        boolean hasTransferEncoding = false;
+        String transferEncoding = null;
         long length = 0;
 
         for (int i = 1; i < lines.length; i++) {
@@ -57,11 +59,24 @@ public class HttpRequestReader {
                     throw new RequestException(400);
                 }
             }
-            if (name.equalsIgnoreCase("Transfer-Encoding")) hasTransferEncoding = true;
+            if (name.equalsIgnoreCase("Transfer-Encoding")) {
+                transferEncoding = transferEncoding == null ? value : transferEncoding + "," + value;
+            }
         }
 
-        // Chunked decoding is the next step; never save its framing as file data.
-        if (hasTransferEncoding) throw new RequestException(hasLength ? 400 : 501);
+        if (transferEncoding != null) {
+            if (hasLength) throw new RequestException(400);
+            String[] codings = transferEncoding.split(",", -1);
+            for (int i = 0; i < codings.length; i++) {
+                String coding = codings[i].trim();
+                if (coding.isEmpty() || (coding.equalsIgnoreCase("chunked") && i != codings.length - 1)) {
+                    throw new RequestException(400);
+                }
+            }
+            if (!codings[codings.length - 1].trim().equalsIgnoreCase("chunked")) throw new RequestException(400);
+            if (codings.length > 1) throw new RequestException(501);
+            chunkedBody = new ChunkedBodyReader(maxBodySize, body);
+        }
         if (length > maxBodySize) throw new RequestException(413);
         contentLength = (int) length;
     }
