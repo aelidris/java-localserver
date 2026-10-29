@@ -92,7 +92,8 @@ public class Server {
 
         try {
             client.configureBlocking(false);
-            client.register(selector, SelectionKey.OP_READ);
+            client.register(selector, SelectionKey.OP_READ,
+                    new HttpRequestReader(configLoader.getMaxBodySize()));
         } catch (IOException | RuntimeException e) {
             client.close();
             throw e;
@@ -114,21 +115,31 @@ public class Server {
 
     private void readData(SelectionKey key) throws IOException {
         SocketChannel client = (SocketChannel) key.channel();
+        HttpRequestReader request = (HttpRequestReader) key.attachment();
 
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         int bytesRead = client.read(buffer);
 
         if (bytesRead == -1) {
-            closeClient(client, key, "🔌 Client disconnected.");
+            if (request.hasData()) sendError(client, key, 400);
+            else closeClient(client, key, "🔌 Client disconnected.");
             return;
         }
         if (bytesRead == 0) return;
         clientLastActiveTime.put(client, System.currentTimeMillis());
 
-        String requestData = new String(buffer.array(), 0, bytesRead);
-        System.out.println("📥 Received request:\n" + requestData);
+        buffer.flip();
+        try {
+            if (!request.read(buffer)) return; // Wait for the next readable event.
+        } catch (HttpRequestReader.RequestException e) {
+            sendError(client, key, e.status);
+            return;
+        }
+        handleRequest(client, key, request);
+    }
 
-        String[] lines = requestData.split("\r\n");
+    private void handleRequest(SocketChannel client, SelectionKey key, HttpRequestReader request) {
+        String[] lines = request.getHeaderLines();
         if (lines.length == 0) {
             sendError(client, key, 400);
             return;
@@ -149,21 +160,8 @@ public class Server {
             return;
         }
 
-        // Parse Cookie header if available
+        System.out.println("📥 " + method + " " + uri);
         String cookieHeader = parseHeaderValue(lines, "Cookie:");
-
-        // Check Content-Length for Payload Too Large (413) on POST requests
-        if (method.equals("POST")) {
-            long contentLength = parseContentLength(lines);
-            if (contentLength < 0) {
-                sendError(client, key, 400);
-                return;
-            }
-            if (contentLength > configLoader.getMaxBodySize()) {
-                sendError(client, key, 413);
-                return;
-            }
-        }
 
         // Route the request via Router
         Router.RequestResult result = router.route(method, uri);
@@ -175,14 +173,13 @@ public class Server {
                     sendResponse(client, key, 200, "File deleted successfully.");
                 } else if (method.equals("POST")) {
                     try {
-                        String body = extractRequestBody(requestData);
                         Path filePath = Paths.get(result.filePath);
 
                         if (filePath.getParent() != null) {
                             Files.createDirectories(filePath.getParent());
                         }
 
-                        Files.writeString(filePath, body);
+                        Files.write(filePath, request.getBody());
 
                         sendResponse(client, key, 201, "File uploaded successfully.");
                     } catch (IOException e) {
@@ -196,7 +193,6 @@ public class Server {
                 try {
                     int queryStart = uri.indexOf('?');
                     String queryString = queryStart < 0 ? "" : uri.substring(queryStart + 1);
-                    String requestBody = method.equals("POST") ? extractRequestBody(requestData) : "";
 
                     Map<String, String> env = new HashMap<>();
                     if (cookieHeader != null) {
@@ -204,7 +200,7 @@ public class Server {
                     }
 
                     // Execute CGI script via CGIHandler
-                    String cgiRawResponse = CGIHandler.executeCGI(result.filePath, method, queryString, requestBody,
+                    String cgiRawResponse = CGIHandler.executeCGI(result.filePath, method, queryString, request.getBody(),
                             env);
 
                     String finalResponse;
@@ -269,39 +265,16 @@ public class Server {
 
     private void closeClient(SocketChannel client, SelectionKey key, String logMessage) {
         clientLastActiveTime.remove(client);
-        if (key != null) key.cancel();
+        if (key != null) {
+            key.attach(null);
+            key.cancel();
+        }
         try {
             System.out.println(logMessage);
             client.close();
         } catch (IOException e) {
             System.out.println("⚠️ Error closing client: " + e.getMessage());
         }
-    }
-
-    private String extractRequestBody(String requestData) {
-        int bodyIndex = requestData.indexOf("\r\n\r\n");
-        if (bodyIndex != -1 && bodyIndex + 4 < requestData.length()) {
-            return requestData.substring(bodyIndex + 4);
-        }
-        return "";
-    }
-
-    private long parseContentLength(String[] lines) {
-        long length = 0;
-        boolean found = false;
-        for (String line : lines) {
-            if (line.toLowerCase().startsWith("content-length:")) {
-                String value = line.substring(15).trim();
-                if (found || !value.matches("[0-9]+")) return -1;
-                found = true;
-                try {
-                    length = Long.parseLong(value);
-                } catch (NumberFormatException e) {
-                    return -1;
-                }
-            }
-        }
-        return length;
     }
 
     private void sendFile(SocketChannel client, SelectionKey key, String filePathStr) {
