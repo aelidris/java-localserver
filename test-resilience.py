@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory(prefix="localserver-test-") as directory:
                                    + str(len(payload)).encode() + b"\r\n\r\n" + payload)
                     response = receive(client)
                     assert response.startswith(b"HTTP/1.1 200 ")
-                    assert response.endswith(b"\n\n" + payload.hex().encode() + b"\n")
+                    assert response.split(b"\r\n\r\n", 1)[1] == payload.hex().encode() + b"\n"
             assert status(healthy) == 200
             print("PASS: fragmented headers/body, binary upload at limit, early EOF, body/header limits, CGI binary/empty input.")
 

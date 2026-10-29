@@ -60,6 +60,9 @@ public class CGIHandler {
                 }
                 if (bytes.length > MAX_OUTPUT) throw new IOException("CGI output is too large");
                 return CGIResponse.parse(bytes);
+            } catch (IOException | RuntimeException e) {
+                close();
+                throw e;
             } finally {
                 if (process != null && !process.isAlive()) close();
             }
@@ -69,7 +72,9 @@ public class CGIHandler {
             if (closed) return;
             closed = true;
             if (process != null) {
-                process.descendants().forEach(child -> child.destroyForcibly());
+                try (var descendants = process.descendants()) {
+                    descendants.forEach(child -> child.destroyForcibly());
+                }
                 process.destroyForcibly();
             }
             for (Path path : new Path[]{input, output, errors, directory}) {
