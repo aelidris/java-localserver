@@ -15,7 +15,7 @@ public class HttpResponseWriter {
                 + "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8), body);
     }
 
-    private HttpResponseWriter(byte[] headers, byte[] body) {
+    HttpResponseWriter(byte[] headers, byte[] body) {
         this.headers = ByteBuffer.wrap(headers);
         this.body = ByteBuffer.wrap(body);
     }

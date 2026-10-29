@@ -91,7 +91,8 @@ and paths containing `.` or `..` segments, repeated slashes, queries or fragment
 
 If `routes` is provided, it must contain `/`. Omitted route methods default to GET;
 the default file is `index.html`, and directory listing defaults to false.
-The listing flag is parsed, but generating directory listings is still pending.
+When the default file is absent, `directory_listing: true` returns an HTML listing;
+`false` returns 403. An existing default file always takes priority.
 CGI mappings and multiple server configurations are later steps.
 
 For example, add this entry inside `routes` to serve `/images/logo.png` from
@@ -128,6 +129,17 @@ The configured location is used as-is for the whole route, without appending the
 original path suffix or query. Methods are checked first; an allowed redirect
 returns an empty body and a `Location` header without accessing the route's files.
 Use `bash test-redirects.sh` to test configuration, routing and partial writes for redirects.
+
+To enable directory browsing, set `"directory_listing": true` on the desired route.
+Listings show directories first, then files, sorted by name. Links use encoded UTF-8
+paths, so spaces, Arabic text and characters such as `+`, `%`, `?` and `#` work.
+Names are escaped for HTML; symlinks, special files, control characters and backslashes
+are omitted. Empty directories return an empty list. `/folder` and `/folder/` both
+use links starting from `/`, so links work with either URL.
+
+Directory scans are limited to 10,000 entries and HTML output to 2 MiB; exceeding
+either limit returns 500. `bash test-listing.sh` checks listing output, URL decoding,
+path boundaries and these limits. HTTP tests also follow generated links.
 
 Run `bash test-config.sh` for configuration checks, `bash test-routing.sh` for
 routing checks, and `python3 test-resilience.py` for HTTP tests, including custom
